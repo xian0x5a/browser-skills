@@ -100,13 +100,14 @@ def test_default_search_dispatches_one_typed_request_and_one_compact_json_object
     assert output.getvalue() == json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
-def test_unexpected_failure_returns_one_compact_internal_error() -> None:
+def test_unexpected_failure_returns_one_compact_internal_error_and_reports_cause_on_stderr() -> None:
     class RaisingLifecycle:
         def search(self, request: SearchRequest) -> CommandOutcome:
             raise RuntimeError("private detail")
 
     stdout = io.StringIO()
-    code = cli.main(["query"], stdout=stdout, lifecycle=RaisingLifecycle())
+    stderr = io.StringIO()
+    code = cli.main(["query"], stdout=stdout, stderr=stderr, lifecycle=RaisingLifecycle())
 
     assert code == 1
     assert json.loads(stdout.getvalue()) == {
@@ -118,6 +119,7 @@ def test_unexpected_failure_returns_one_compact_internal_error() -> None:
         },
     }
     assert "private detail" not in stdout.getvalue()
+    assert stderr.getvalue() == "RuntimeError: private detail\n"
 
 
 def test_cleanup_runs_after_success_json_is_flushed() -> None:

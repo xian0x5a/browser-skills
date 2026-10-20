@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from typing import IO, NoReturn, Protocol
 
 from .contracts import CommandOutcome, ProcessExitCode, SearchRequest
@@ -74,7 +75,7 @@ def main(
 ) -> int:
     input_stream = sys.stdin if stdin is None else stdin
     output_stream = sys.stdout if stdout is None else stdout
-    _ = stderr
+    error_stream = sys.stderr if stderr is None else stderr
     try:
         args = build_parser().parse_args(argv)
         query_input = input_stream.read() if args.query == "-" else args.query
@@ -98,7 +99,10 @@ def main(
             if error.type is PublicErrorType.INVALID_REQUEST
             else ProcessExitCode.OPERATIONAL_FAILURE,
         )
-    except Exception:
+    except Exception as error:
+        # The public error has a fixed message, so the cause (often an
+        # environment fault such as a read-only state directory) goes to stderr.
+        error_stream.write("".join(traceback.format_exception_only(error)))
         outcome = CommandOutcome.failure(PublicError(PublicErrorType.INTERNAL_ERROR))
     try:
         output_stream.write(

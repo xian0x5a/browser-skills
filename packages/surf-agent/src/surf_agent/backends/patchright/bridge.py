@@ -63,6 +63,8 @@ PATCHRIGHT_INCOMPATIBLE_DEFAULT_ARGS = ("--password-store=basic", "--use-mock-ke
 # focus. Thread windows are created later, in the background.
 NO_STARTUP_WINDOW_ARG = "--no-startup-window"
 BLANK_PAGE_URL = "about:blank"
+# Chrome's Page.resetNavigationHistory error while a back/forward navigation is pending.
+HISTORY_NAVIGATION_PENDING_MESSAGE = "History cannot be pruned"
 # The windowless launch relies on Patchright skipping its first-page wait; if a
 # Patchright release stops skipping it, fail after this instead of hanging.
 LAUNCH_TIMEOUT_MS = 30_000
@@ -458,6 +460,11 @@ class PatchrightRuntime:
         session = await self._maybe_await(self._context().new_cdp_session(page))
         try:
             await self._maybe_await(session.send("Page.resetNavigationHistory"))
+        except Exception as exc:
+            # Chrome refuses while the page itself runs a history navigation; the page
+            # then owns its history and the open has still succeeded.
+            if HISTORY_NAVIGATION_PENDING_MESSAGE not in str(exc):
+                raise
         finally:
             await self._best_effort_detach(session)
 

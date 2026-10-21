@@ -160,7 +160,8 @@ def patchright_disk_cache_dir(profile_dir: Path) -> Path | None:
     two profiles given one directory would share a cache, and a profile chosen through
     SURF_AGENT_PROFILE_DIR keeps the layout its owner gave it.
     """
-    if profile_dir != surf_profile_dir():
+    # Resolved like the bridge identity, so a symlink to Surf's profile is still Surf's profile.
+    if profile_dir.resolve() != surf_profile_dir().resolve():
         return None
     return surf_agent_cache_dir() / "profiles" / "chrome"
 

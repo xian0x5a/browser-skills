@@ -149,6 +149,8 @@ class RuntimeTests(unittest.TestCase):
             def send(self, method, params=None):
                 if method == "Target.getTargetInfo":
                     return {"targetInfo": {"targetId": self.page.target_id}}
+                if method == "Page.resetNavigationHistory":
+                    return {}
                 self.context.cdp_calls.append((method, params))
                 self.context.pages.append(FakePage(params["url"], target_id="target-1"))
                 return {"targetId": "target-1"}
@@ -219,6 +221,8 @@ class RuntimeTests(unittest.TestCase):
             def send(self, method, params=None):
                 if method == "Target.getTargetInfo":
                     return {"targetInfo": {"targetId": self.page.target_id}}
+                if method == "Page.resetNavigationHistory":
+                    return {}
                 self.context.cdp_calls.append((method, params))
                 if self.context.fail_closed:
                     raise RuntimeError(patchright_bridge.CLOSED_TARGET_MESSAGE)
@@ -334,6 +338,8 @@ class RuntimeTests(unittest.TestCase):
             def send(self, method, params=None):
                 if method == "Target.getTargetInfo":
                     return {"targetInfo": {"targetId": self.page.target_id}}
+                if method == "Page.resetNavigationHistory":
+                    return {}
                 self.context.cdp_calls.append((method, params))
                 page = CreatedPage(params["url"], target_id="target-1")
                 self.context.pages.append(page)
@@ -507,6 +513,8 @@ class RuntimeTests(unittest.TestCase):
             def send(self, method, params=None):
                 if method == "Target.getTargetInfo":
                     return {"targetInfo": {"targetId": self.page.target_id}}
+                if method == "Page.resetNavigationHistory":
+                    return {}
                 if method == "Page.getLayoutMetrics":
                     return {"cssVisualViewport": {"zoom": 1}}
                 self.context.cdp_calls.append((method, params))

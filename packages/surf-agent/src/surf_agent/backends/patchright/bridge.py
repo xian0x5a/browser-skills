@@ -449,7 +449,17 @@ class PatchrightRuntime:
             # appears before that navigation commits, so the page came back without its URL
             # or content, and under Patchright 1.60 never left about:blank (issue #38).
             await self._maybe_await(page.goto(url, wait_until="domcontentloaded"))
+            await self._forget_blank_history_entry(page)
         return slot
+
+    async def _forget_blank_history_entry(self, page: Any) -> None:
+        # The window commits about:blank before its first page, so back() would return
+        # to it; a thread's history starts at the page it was opened at.
+        session = await self._maybe_await(self._context().new_cdp_session(page))
+        try:
+            await self._maybe_await(session.send("Page.resetNavigationHistory"))
+        finally:
+            await self._best_effort_detach(session)
 
     async def _create_new_window_page(self) -> Any:
         context = self._context()

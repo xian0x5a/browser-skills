@@ -4,10 +4,12 @@ from enum import StrEnum
 import itertools
 import os
 import sys
+import threading
 import traceback
 from types import TracebackType
 
 PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__)) + os.sep
+THREADING_MODULE_FILE = os.path.abspath(threading.__file__)
 
 
 class ErrorCode(StrEnum):
@@ -57,9 +59,10 @@ def _is_surf_frame(frame: traceback.FrameSummary) -> bool:
     return os.path.abspath(frame.filename).startswith(PACKAGE_DIRECTORY)
 
 
-def _is_frozen_frame(frame: traceback.FrameSummary) -> bool:
-    # Python's own runpy and importlib machinery, e.g. under `python -m`.
-    return frame.filename.startswith("<frozen ")
+def _is_python_machinery_frame(frame: traceback.FrameSummary) -> bool:
+    # Python's own runpy and importlib machinery, e.g. under `python -m`, and the
+    # frames threading.Thread adds above a thread's target.
+    return frame.filename.startswith("<frozen ") or os.path.abspath(frame.filename) == THREADING_MODULE_FILE
 
 
 def surf_error_summary(error: SurfAgentError) -> str:
@@ -87,7 +90,7 @@ def format_surf_error(error: SurfAgentError, trace: TracebackType | None) -> str
     tokens. The caller's frames are the run outside this package that ends at the
     first call into it; leading Surf frames are the session runner executing a cell.
     """
-    frames = [frame for frame in traceback.extract_tb(trace) if not _is_frozen_frame(frame)]
+    frames = [frame for frame in traceback.extract_tb(trace) if not _is_python_machinery_frame(frame)]
     caller_frames = itertools.takewhile(
         lambda frame: not _is_surf_frame(frame),
         itertools.dropwhile(_is_surf_frame, frames),
@@ -96,8 +99,9 @@ def format_surf_error(error: SurfAgentError, trace: TracebackType | None) -> str
 
 
 def install_brief_surf_tracebacks() -> None:
-    """Print uncaught Surf errors briefly in a script; other errors keep the full traceback."""
+    """Print uncaught Surf errors briefly in a script or a thread it starts; other errors keep the full traceback."""
     previous_hook = sys.excepthook
+    previous_thread_hook = threading.excepthook
 
     def excepthook(
         error_type: type[BaseException], error: BaseException, trace: TracebackType | None
@@ -107,4 +111,16 @@ def install_brief_surf_tracebacks() -> None:
         else:
             previous_hook(error_type, error, trace)
 
+    def thread_excepthook(hook_args: threading.ExceptHookArgs) -> None:
+        error = hook_args.exc_value
+        if isinstance(error, SurfAgentError):
+            # Same header as Python's default thread hook, so the caller knows which thread failed.
+            thread_name = hook_args.thread.name if hook_args.thread else threading.get_ident()
+            sys.stderr.write(
+                f"Exception in thread {thread_name}:\n" + format_surf_error(error, hook_args.exc_traceback)
+            )
+        else:
+            previous_thread_hook(hook_args)
+
     sys.excepthook = excepthook
+    threading.excepthook = thread_excepthook

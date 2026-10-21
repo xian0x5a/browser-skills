@@ -217,4 +217,4 @@ Closes remembered pages whose thread names match the glob.
 - `bridge_unavailable`: The browser bridge is not reachable. The call did not reach the browser.
 - `outcome_unknown`: The call reached the browser but its result was lost. It may have taken effect; follow the [recovery workflow](../SKILL.md#recovery).
 
-An uncaught `SurfAgentError` prints the frames up to your call into Surf and `ErrorName [code]: message` (`[code]` only when the error has one), plus a `Caused by:` line for any error it wraps; other exceptions print their full traceback.
+An uncaught `SurfAgentError`, in your script or a thread it starts, prints the frames up to your call into Surf and `ErrorName [code]: message` (`[code]` only when the error has one), plus a `Caused by:` line for any error it wraps; other exceptions print their full traceback.

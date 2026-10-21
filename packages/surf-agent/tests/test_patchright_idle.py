@@ -35,6 +35,7 @@ def test_patchright_launch_is_windowless_with_patchrights_own_flags(monkeypatch,
     launch_options: dict[str, object] = {}
     patchright_flags = [
         "--disable-field-trial-config",
+        "--disable-features=AcceptCHFrame",
         "--password-store=basic",
         "--use-mock-keychain",
         f"--user-data-dir={tmp_path / 'chrome'}",
@@ -65,6 +66,7 @@ def test_patchright_launch_is_windowless_with_patchrights_own_flags(monkeypatch,
     monkeypatch.setattr(bridge, "capture_default_args", capture)
     runtime = PatchrightRuntime(
         profile_dir=tmp_path / "chrome",
+        disk_cache_dir=tmp_path / "cache",
         app_id="surf-agent",
     )
     try:
@@ -88,11 +90,13 @@ def test_patchright_launch_is_windowless_with_patchrights_own_flags(monkeypatch,
         "timeout": bridge.LAUNCH_TIMEOUT_MS,
         "args": [
             "--disable-field-trial-config",
+            "--disable-features=AcceptCHFrame,OptimizationGuideModelExecution",
             f"--user-data-dir={tmp_path / 'chrome'}",
             "--remote-debugging-pipe",
             "--class=surf-agent",
             "--name=surf-agent",
             "--no-startup-window",
+            f"--disk-cache-dir={tmp_path / 'cache'}",
         ],
     }
 

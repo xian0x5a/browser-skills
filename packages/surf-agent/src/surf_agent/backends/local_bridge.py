@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, ContextManager
+from typing import Any, Callable, ContextManager, Sequence
 
 from ..constants import CHROME_NEW_WINDOW_TIMEOUT_S, DEFAULT_WAIT_TIMEOUT_MS
 from ..errors import BridgeToolError, BridgeUnavailable, ErrorCode, SurfAgentError
@@ -28,6 +28,7 @@ class LocalBridgeClient:
         port: int,
         profile_dir: Path,
         startup_error: str,
+        bridge_args: Sequence[str] = (),
         timeout_hint: str = "",
         before_start: Callable[[], ContextManager[None]] | None = None,
     ) -> None:
@@ -37,6 +38,7 @@ class LocalBridgeClient:
         self.port = port
         self.profile_dir = profile_dir
         self.startup_error = startup_error
+        self.bridge_args = tuple(bridge_args)
         self.timeout_hint = timeout_hint
         self.before_start = before_start
 
@@ -156,6 +158,7 @@ class LocalBridgeClient:
                 str(self.port),
                 "--profile-dir",
                 str(self.profile_dir),
+                *self.bridge_args,
             ]
             subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + CHROME_NEW_WINDOW_TIMEOUT_S

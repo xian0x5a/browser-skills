@@ -18,7 +18,7 @@ from typing import Any
 from ...constants import DEFAULT_PATCHRIGHT_APP_ID, DEFAULT_WAIT_TIMEOUT_MS, PATCHRIGHT_BACKEND
 from ...errors import ErrorCode
 from .constants import CONTEXT_RESTART_REQUIRED
-from .launch_args import STARTUP_PAGE_ARG, capture_default_args
+from .launch_args import STARTUP_PAGE_ARG, capture_default_args, keep_disposable_data_out_of_profile
 from .network_capture import NetworkCapture
 from .saved_zoom import clear_saved_zoom
 from ..bridge_common import (
@@ -62,6 +62,9 @@ PATCHRIGHT_INCOMPATIBLE_DEFAULT_ARGS = ("--password-store=basic", "--use-mock-ke
 # Chrome starts without a window: on macOS showing one activates Chrome and steals
 # focus. Thread windows are created later, in the background.
 NO_STARTUP_WINDOW_ARG = "--no-startup-window"
+BLANK_PAGE_URL = "about:blank"
+# Chrome's Page.resetNavigationHistory error while a back/forward navigation is pending.
+HISTORY_NAVIGATION_PENDING_MESSAGE = "History cannot be pruned"
 # The windowless launch relies on Patchright skipping its first-page wait; if a
 # Patchright release stops skipping it, fail after this instead of hanging.
 LAUNCH_TIMEOUT_MS = 30_000
@@ -70,8 +73,16 @@ ZOOM_TOLERANCE = 1e-3
 
 
 class PatchrightRuntime:
-    def __init__(self, *, profile_dir: Path, headless: bool = False, app_id: str = DEFAULT_PATCHRIGHT_APP_ID) -> None:
+    def __init__(
+        self,
+        *,
+        profile_dir: Path,
+        disk_cache_dir: Path | None = None,
+        headless: bool = False,
+        app_id: str = DEFAULT_PATCHRIGHT_APP_ID,
+    ) -> None:
         self.profile_dir = profile_dir
+        self.disk_cache_dir = disk_cache_dir
         self.headless = headless
         self.app_id = app_id
         self.manager: Any | None = None
@@ -169,7 +180,9 @@ class PatchrightRuntime:
                 channel="chrome",
                 ignore_default_args=True,
                 timeout=LAUNCH_TIMEOUT_MS,
-                args=[*chrome_args, *launch_args, NO_STARTUP_WINDOW_ARG],
+                args=keep_disposable_data_out_of_profile(
+                    [*chrome_args, *launch_args, NO_STARTUP_WINDOW_ARG], disk_cache_dir=self.disk_cache_dir
+                ),
             )
         )
         self.network.attach(self.browser_or_context)
@@ -244,7 +257,7 @@ class PatchrightRuntime:
             raise RuntimeError("scroll requires direction: up, down, top, or bottom")
         await self._start_async()
         if name == "new":
-            url = str(args.get("url") or "about:blank")
+            url = str(args.get("url") or BLANK_PAGE_URL)
             slot = await self._new_page(thread, url=url)
             return self._format_opened(slot.page)
         if name == "open":
@@ -422,22 +435,40 @@ class PatchrightRuntime:
         old = self.pages.pop(thread, None)
         if old and self._page_is_open(old.page):
             await self._maybe_await(old.page.close())
-        target_url = str(url or "about:blank")
-
         try:
-            page = await self._create_new_window_page(target_url)
+            page = await self._create_new_window_page()
         except Exception as exc:
             if not self._is_closed_target_error(exc):
                 raise
             # Manual window close can close the whole persistent context; recreate it.
             await self._restart_closed_context()
-            page = await self._create_new_window_page(target_url)
+            page = await self._create_new_window_page()
         slot = PageSlot(page=page, page_id=self._next_page_id)
         self._next_page_id += 1
         self.pages[thread] = slot
+        if url and url != BLANK_PAGE_URL:
+            # Navigate here rather than handing the URL to Target.createTarget: the target
+            # appears before that navigation commits, so the page came back without its URL
+            # or content, and under Patchright 1.60 never left about:blank (issue #38).
+            await self._maybe_await(page.goto(url, wait_until="domcontentloaded"))
+            await self._forget_blank_history_entry(page)
         return slot
 
-    async def _create_new_window_page(self, url: str) -> Any:
+    async def _forget_blank_history_entry(self, page: Any) -> None:
+        # The window commits about:blank before its first page, so back() would return
+        # to it; a thread's history starts at the page it was opened at.
+        session = await self._maybe_await(self._context().new_cdp_session(page))
+        try:
+            await self._maybe_await(session.send("Page.resetNavigationHistory"))
+        except Exception as exc:
+            # Chrome refuses while the page itself runs a history navigation; the page
+            # then owns its history and the open has still succeeded.
+            if HISTORY_NAVIGATION_PENDING_MESSAGE not in str(exc):
+                raise
+        finally:
+            await self._best_effort_detach(session)
+
+    async def _create_new_window_page(self) -> Any:
         context = self._context()
         excluded_page_ids = {id(page) for page in self._open_managed_pages()}
         session = None
@@ -450,13 +481,13 @@ class PatchrightRuntime:
             # Background: a foreground window activates Chrome and steals focus from the
             # user's app (measured on macOS). Thread.focus() raises a window on request.
             response = await self._maybe_await(
-                session.send("Target.createTarget", {"url": url, "newWindow": True, "background": True})
+                session.send("Target.createTarget", {"url": BLANK_PAGE_URL, "newWindow": True, "background": True})
             )
             target_id = response.get("targetId") if isinstance(response, dict) else None
             if not isinstance(target_id, str) or not target_id:
-                raise RuntimeError(f"Patchright CDP Target.createTarget returned no valid target for {url!r}")
+                raise RuntimeError("Patchright CDP Target.createTarget returned no valid target")
             try:
-                return await self._wait_for_created_target_page(context, url, excluded_page_ids, target_id)
+                return await self._wait_for_created_target_page(context, excluded_page_ids, target_id)
             except Exception:
                 await self._best_effort_close_target(session, target_id)
                 raise
@@ -479,7 +510,7 @@ class PatchrightRuntime:
                     raise
 
     async def _wait_for_created_target_page(
-        self, context: Any, url: str, excluded_page_ids: set[int], target_id: str
+        self, context: Any, excluded_page_ids: set[int], target_id: str
     ) -> Any:
         deadline = time.monotonic() + CDP_NEW_WINDOW_TIMEOUT_S
         while time.monotonic() < deadline:
@@ -493,7 +524,7 @@ class PatchrightRuntime:
                     return page
             await asyncio.sleep(CDP_NEW_WINDOW_POLL_INTERVAL_S)
         raise RuntimeError(
-            f"Patchright CDP Target.createTarget did not expose target {target_id!r} for {url!r}"
+            f"Patchright CDP Target.createTarget did not expose target {target_id!r}"
         )
 
     async def _require_unzoomed(self, page: Any) -> None:
@@ -772,13 +803,17 @@ def main(argv: list[str] | None = None) -> int:
         "--profile-dir",
         default=os.environ.get("SURF_AGENT_PROFILE_DIR") or "",
     )
+    parser.add_argument("--disk-cache-dir", default="")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--app-id", default=os.environ.get("SURF_AGENT_APP_ID") or DEFAULT_PATCHRIGHT_APP_ID)
     args = parser.parse_args(argv)
     home = os.environ.get("SURF_AGENT_HOME")
     default_profile_dir = (Path(home).expanduser() if home else Path(PlatformDirs("surf-agent", appauthor=False).user_data_dir)) / "profiles" / "chrome"
     profile_dir = Path(args.profile_dir).expanduser() if args.profile_dir else default_profile_dir
-    RequestHandler.runtime = PatchrightRuntime(profile_dir=profile_dir, headless=args.headless, app_id=args.app_id)
+    disk_cache_dir = Path(args.disk_cache_dir).expanduser() if args.disk_cache_dir else None
+    RequestHandler.runtime = PatchrightRuntime(
+        profile_dir=profile_dir, disk_cache_dir=disk_cache_dir, headless=args.headless, app_id=args.app_id
+    )
     # Playwright/Patchright sync objects are bound to the thread that created them.
     # Use a single-threaded HTTP server so every browser call runs on one thread.
     server = PatchrightHTTPServer(("127.0.0.1", args.port), RequestHandler)

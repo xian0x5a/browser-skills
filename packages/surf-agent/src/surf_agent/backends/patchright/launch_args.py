@@ -9,8 +9,31 @@ from typing import Any
 
 # Patchright appends this as the startup page of every persistent launch.
 STARTUP_PAGE_ARG = "about:blank"
+DISABLE_FEATURES_PREFIX = "--disable-features="
+# Gates Chrome's on-device model (Gemini Nano), which it otherwise downloads into the
+# profile at about 4 GB. Surf uses no Chrome AI feature.
+ON_DEVICE_MODEL_FEATURE = "OptimizationGuideModelExecution"
 # The stub exits at once; a slow answer means Patchright never started it.
 CAPTURE_TIMEOUT_MS = 10_000
+
+
+def keep_disposable_data_out_of_profile(args: list[str], *, disk_cache_dir: Path | None) -> list[str]:
+    """Chrome flags that stop the on-device model download and, given a directory, move the HTTP cache there.
+
+    Chrome keeps the HTTP cache and Code Cache under <disk_cache_dir>/<profile name>/.
+    Service Worker storage stays in the profile: it is site data, not a cache.
+    """
+    # Chrome reads only the last --disable-features, so extend Patchright's own one.
+    has_disable_features = any(arg.startswith(DISABLE_FEATURES_PREFIX) for arg in args)
+    merged = [
+        f"{arg},{ON_DEVICE_MODEL_FEATURE}" if arg.startswith(DISABLE_FEATURES_PREFIX) else arg
+        for arg in args
+    ]
+    if not has_disable_features:
+        merged.append(DISABLE_FEATURES_PREFIX + ON_DEVICE_MODEL_FEATURE)
+    if disk_cache_dir is not None:
+        merged.append(f"--disk-cache-dir={disk_cache_dir}")
+    return merged
 
 
 async def capture_default_args(chromium: Any, **launch_options: Any) -> list[str]:

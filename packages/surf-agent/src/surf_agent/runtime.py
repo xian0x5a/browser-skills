@@ -53,6 +53,7 @@ class SurfAgent:
         self.patchright_profile_dir = (
             patchright_profile_dir or default_patchright_profile_dir()
         )
+        self.patchright_disk_cache_dir = patchright_disk_cache_dir(self.patchright_profile_dir)
         self.patchright_app_id = (
             patchright_app_id
             or os.environ.get("SURF_AGENT_APP_ID")
@@ -63,6 +64,7 @@ class SurfAgent:
             timeout_s=self.command_timeout_s,
             port=self.patchright_port,
             profile_dir=self.patchright_profile_dir,
+            disk_cache_dir=self.patchright_disk_cache_dir,
         )
         cookie_source = persisted_config.get_cookie_source(path=config_file())
         self.cookie_import_enabled = cookie_source is not None
@@ -97,6 +99,7 @@ class SurfAgent:
         return self.browser_backend.profile_open(
             url,
             profile_dir=str(self.patchright_profile_dir),
+            disk_cache_dir=self.patchright_disk_cache_dir,
             app_id=self.patchright_app_id,
         )
 
@@ -130,6 +133,11 @@ def surf_agent_data_dir() -> Path:
     return surf_agent_home() or Path(APP_DIRS.user_data_dir)
 
 
+def surf_agent_cache_dir() -> Path:
+    home = surf_agent_home()
+    return home / "cache" if home else Path(APP_DIRS.user_cache_dir)
+
+
 def config_file() -> Path:
     return surf_agent_config_dir() / "config.json"
 
@@ -138,7 +146,24 @@ def default_patchright_profile_dir() -> Path:
     value = os.environ.get("SURF_AGENT_PROFILE_DIR")
     if value:
         return Path(value).expanduser()
+    return surf_profile_dir()
+
+
+def surf_profile_dir() -> Path:
     return surf_agent_data_dir() / "profiles" / "chrome"
+
+
+def patchright_disk_cache_dir(profile_dir: Path) -> Path | None:
+    """Where Chrome keeps the profile's HTTP cache, outside the profile; None leaves it inside.
+
+    Only Surf's own profile moves: Chrome keeps the cache at <dir>/Default/Cache, so
+    two profiles given one directory would share a cache, and a profile chosen through
+    SURF_AGENT_PROFILE_DIR keeps the layout its owner gave it.
+    """
+    # Resolved like the bridge identity, so a symlink to Surf's profile is still Surf's profile.
+    if profile_dir.resolve() != surf_profile_dir().resolve():
+        return None
+    return surf_agent_cache_dir() / "profiles" / "chrome"
 
 
 def safe_thread_name(thread: str) -> str:

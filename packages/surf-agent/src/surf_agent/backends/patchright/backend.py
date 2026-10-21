@@ -12,6 +12,7 @@ from ...chrome_lifecycle import browser_executable_family
 from ..local_bridge import LocalBridgeBackend, LocalBridgeClient, stable_local_page_id
 from ..bridge_common import bridge_health_payload
 from .constants import CONTEXT_RESTART_REQUIRED
+from .launch_args import keep_disposable_data_out_of_profile
 
 # Patchright ships with surf-agent; what a fresh host most often lacks is Chrome,
 # which automation launches through Patchright's `chrome` channel.
@@ -19,7 +20,7 @@ PATCHRIGHT_STARTUP_HINT = "install Google Chrome in its standard location, where
 
 
 class PatchrightBridgeClient(LocalBridgeClient):
-    def __init__(self, *, timeout_s: float, port: int, profile_dir: Path) -> None:
+    def __init__(self, *, timeout_s: float, port: int, profile_dir: Path, disk_cache_dir: Path | None = None) -> None:
         super().__init__(
             backend_label="Patchright",
             module_name="surf_agent.backends.patchright.bridge",
@@ -27,6 +28,7 @@ class PatchrightBridgeClient(LocalBridgeClient):
             port=port,
             profile_dir=profile_dir,
             startup_error=PATCHRIGHT_STARTUP_HINT,
+            bridge_args=("--disk-cache-dir", str(disk_cache_dir)) if disk_cache_dir else (),
             timeout_hint="; restart it with `Browser().stop_bridge()` if it stays wedged",
         )
 
@@ -78,7 +80,7 @@ class PatchrightBackend(LocalBridgeBackend):
             raise SurfAgentError("Patchright bridge close-matching returned invalid JSON")
         return 1 if result["failed"] else 0
 
-    def profile_open(self, url: str, *, profile_dir: str, app_id: str) -> int:
+    def profile_open(self, url: str, *, profile_dir: str, disk_cache_dir: Path | None, app_id: str) -> int:
         if browser_executable_family(self.agent.chrome_bin) != "chrome":
             raise SurfAgentError("Patchright profile open requires a provable Google Chrome executable")
         with self.agent._patchright_startup_guard():
@@ -88,7 +90,14 @@ class PatchrightBackend(LocalBridgeBackend):
                 raise SurfAgentError("could not find Chrome executable for profile open; set SURF_AGENT_CHROME_BIN")
             profile_path = Path(profile_dir)
             profile_path.mkdir(parents=True, exist_ok=True)
-            command = [*shlex.split(self.agent.chrome_bin), f"--class={app_id}", f"--user-data-dir={profile_path}", "--new-window", f"--name={app_id}", url]
+            command = [
+                *shlex.split(self.agent.chrome_bin),
+                *keep_disposable_data_out_of_profile(
+                    [f"--class={app_id}", f"--user-data-dir={profile_path}", "--new-window", f"--name={app_id}"],
+                    disk_cache_dir=disk_cache_dir,
+                ),
+                url,
+            ]
             subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,

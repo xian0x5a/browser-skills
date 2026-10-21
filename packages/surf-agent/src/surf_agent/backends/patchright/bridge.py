@@ -18,7 +18,7 @@ from typing import Any
 from ...constants import DEFAULT_PATCHRIGHT_APP_ID, DEFAULT_WAIT_TIMEOUT_MS, PATCHRIGHT_BACKEND
 from ...errors import ErrorCode
 from .constants import CONTEXT_RESTART_REQUIRED
-from .launch_args import STARTUP_PAGE_ARG, capture_default_args
+from .launch_args import STARTUP_PAGE_ARG, capture_default_args, keep_disposable_data_out_of_profile
 from .network_capture import NetworkCapture
 from .saved_zoom import clear_saved_zoom
 from ..bridge_common import (
@@ -71,8 +71,16 @@ ZOOM_TOLERANCE = 1e-3
 
 
 class PatchrightRuntime:
-    def __init__(self, *, profile_dir: Path, headless: bool = False, app_id: str = DEFAULT_PATCHRIGHT_APP_ID) -> None:
+    def __init__(
+        self,
+        *,
+        profile_dir: Path,
+        disk_cache_dir: Path | None = None,
+        headless: bool = False,
+        app_id: str = DEFAULT_PATCHRIGHT_APP_ID,
+    ) -> None:
         self.profile_dir = profile_dir
+        self.disk_cache_dir = disk_cache_dir
         self.headless = headless
         self.app_id = app_id
         self.manager: Any | None = None
@@ -170,7 +178,9 @@ class PatchrightRuntime:
                 channel="chrome",
                 ignore_default_args=True,
                 timeout=LAUNCH_TIMEOUT_MS,
-                args=[*chrome_args, *launch_args, NO_STARTUP_WINDOW_ARG],
+                args=keep_disposable_data_out_of_profile(
+                    [*chrome_args, *launch_args, NO_STARTUP_WINDOW_ARG], disk_cache_dir=self.disk_cache_dir
+                ),
             )
         )
         self.network.attach(self.browser_or_context)
@@ -776,13 +786,17 @@ def main(argv: list[str] | None = None) -> int:
         "--profile-dir",
         default=os.environ.get("SURF_AGENT_PROFILE_DIR") or "",
     )
+    parser.add_argument("--disk-cache-dir", default="")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--app-id", default=os.environ.get("SURF_AGENT_APP_ID") or DEFAULT_PATCHRIGHT_APP_ID)
     args = parser.parse_args(argv)
     home = os.environ.get("SURF_AGENT_HOME")
     default_profile_dir = (Path(home).expanduser() if home else Path(PlatformDirs("surf-agent", appauthor=False).user_data_dir)) / "profiles" / "chrome"
     profile_dir = Path(args.profile_dir).expanduser() if args.profile_dir else default_profile_dir
-    RequestHandler.runtime = PatchrightRuntime(profile_dir=profile_dir, headless=args.headless, app_id=args.app_id)
+    disk_cache_dir = Path(args.disk_cache_dir).expanduser() if args.disk_cache_dir else None
+    RequestHandler.runtime = PatchrightRuntime(
+        profile_dir=profile_dir, disk_cache_dir=disk_cache_dir, headless=args.headless, app_id=args.app_id
+    )
     # Playwright/Patchright sync objects are bound to the thread that created them.
     # Use a single-threaded HTTP server so every browser call runs on one thread.
     server = PatchrightHTTPServer(("127.0.0.1", args.port), RequestHandler)

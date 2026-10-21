@@ -118,6 +118,7 @@ class RuntimeTests(unittest.TestCase):
                 f"--user-data-dir={profile}",
                 "--new-window",
                 "--name=surf-agent-test",
+                "--disable-features=OptimizationGuideModelExecution",
                 "https://x.test",
             ],
         )

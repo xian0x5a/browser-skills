@@ -9,8 +9,9 @@ Install Google Chrome where Patchright's `chrome` channel finds it (its standard
 ## Runtime data
 
 - Storage: `config.json` (including [cookie import](cookie-import.md) settings) lives in the platform config directory, locks and search state in the state directory, and the profile in the data directory under `profiles/chrome/`. On Linux these follow `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME`, so overriding `HOME` alone moves nothing while those are set.
-- `SURF_AGENT_HOME`: one directory that replaces all three, so config, state and the profile (`$SURF_AGENT_HOME/profiles/chrome`) move together. A new location starts with an empty profile and without the user's cookie-import config.
-- `SURF_AGENT_PROFILE_DIR`: overrides the profile.
+- Cache: Chrome's HTTP cache and Code Cache for the profile live in the platform cache directory under `profiles/chrome/` (`~/.cache/surf-agent` on Linux, `~/Library/Caches/surf-agent` on macOS) and may be deleted at any time. Chrome's on-device AI model (Gemini Nano, about 4 GB) is disabled, so it is not downloaded into the profile.
+- `SURF_AGENT_HOME`: one directory that replaces all three, so config, state and the profile (`$SURF_AGENT_HOME/profiles/chrome`) move together, with the cache in `$SURF_AGENT_HOME/cache`. A new location starts with an empty profile and without the user's cookie-import config.
+- `SURF_AGENT_PROFILE_DIR`: overrides the profile. Its cache stays inside it, as Chrome lays it out.
 - `SURF_AGENT_PORT`: bridge port, default `9346`.
 - `SURF_AGENT_APP_ID`: Wayland app-id and X11 WM_CLASS of Surf's Chrome windows, default `surf-agent`.
 

@@ -137,6 +137,9 @@ class RuntimeTests(unittest.TestCase):
             def close(self):
                 self.closed = True
 
+            def goto(self, url, wait_until=None):
+                self.url = url
+
         class FakeSession:
             def __init__(self, context, page):
                 self.context = context
@@ -182,7 +185,7 @@ class RuntimeTests(unittest.TestCase):
                 (
                     "Target.createTarget",
                     {
-                        "url": "https://welcome.test/",
+                        "url": "about:blank",
                         "newWindow": True,
                         "background": True,
                     },
@@ -202,6 +205,9 @@ class RuntimeTests(unittest.TestCase):
 
             def close(self):
                 self.closed = True
+
+            def goto(self, url, wait_until=None):
+                self.url = url
 
         class FakeSession:
             def __init__(self, context, page):
@@ -264,7 +270,7 @@ class RuntimeTests(unittest.TestCase):
                 (
                     "Target.createTarget",
                     {
-                        "url": "https://welcome.test/",
+                        "url": "about:blank",
                         "newWindow": True,
                         "background": True,
                     },
@@ -277,7 +283,7 @@ class RuntimeTests(unittest.TestCase):
                 (
                     "Target.createTarget",
                     {
-                        "url": "https://welcome.test/",
+                        "url": "about:blank",
                         "newWindow": True,
                         "background": True,
                     },
@@ -316,9 +322,7 @@ class RuntimeTests(unittest.TestCase):
 
             def goto(self, url, wait_until=None):
                 self.goto_calls.append(url)
-                raise AssertionError(
-                    "CDP-created replacement page should not be navigated again"
-                )
+                self.url = url
 
         class FakeSession:
             def __init__(self, context, page):
@@ -364,14 +368,14 @@ class RuntimeTests(unittest.TestCase):
             "opened https://example.test/\n",
         )
         self.assertEqual(runtime.pages["thread"].page.url, "https://example.test/")
-        self.assertEqual(runtime.pages["thread"].page.goto_calls, [])
+        self.assertEqual(runtime.pages["thread"].page.goto_calls, ["https://example.test/"])
         self.assertEqual(
             context.cdp_calls,
             [
                 (
                     "Target.createTarget",
                     {
-                        "url": "https://example.test/",
+                        "url": "about:blank",
                         "newWindow": True,
                         "background": True,
                     },
@@ -545,7 +549,7 @@ class RuntimeTests(unittest.TestCase):
                 (
                     "Target.createTarget",
                     {
-                        "url": "https://example.test/",
+                        "url": "about:blank",
                         "newWindow": True,
                         "background": True,
                     },

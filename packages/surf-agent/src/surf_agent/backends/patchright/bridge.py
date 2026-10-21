@@ -62,6 +62,7 @@ PATCHRIGHT_INCOMPATIBLE_DEFAULT_ARGS = ("--password-store=basic", "--use-mock-ke
 # Chrome starts without a window: on macOS showing one activates Chrome and steals
 # focus. Thread windows are created later, in the background.
 NO_STARTUP_WINDOW_ARG = "--no-startup-window"
+BLANK_PAGE_URL = "about:blank"
 # The windowless launch relies on Patchright skipping its first-page wait; if a
 # Patchright release stops skipping it, fail after this instead of hanging.
 LAUNCH_TIMEOUT_MS = 30_000
@@ -244,7 +245,7 @@ class PatchrightRuntime:
             raise RuntimeError("scroll requires direction: up, down, top, or bottom")
         await self._start_async()
         if name == "new":
-            url = str(args.get("url") or "about:blank")
+            url = str(args.get("url") or BLANK_PAGE_URL)
             slot = await self._new_page(thread, url=url)
             return self._format_opened(slot.page)
         if name == "open":
@@ -422,22 +423,25 @@ class PatchrightRuntime:
         old = self.pages.pop(thread, None)
         if old and self._page_is_open(old.page):
             await self._maybe_await(old.page.close())
-        target_url = str(url or "about:blank")
-
         try:
-            page = await self._create_new_window_page(target_url)
+            page = await self._create_new_window_page()
         except Exception as exc:
             if not self._is_closed_target_error(exc):
                 raise
             # Manual window close can close the whole persistent context; recreate it.
             await self._restart_closed_context()
-            page = await self._create_new_window_page(target_url)
+            page = await self._create_new_window_page()
         slot = PageSlot(page=page, page_id=self._next_page_id)
         self._next_page_id += 1
         self.pages[thread] = slot
+        if url and url != BLANK_PAGE_URL:
+            # Navigate here rather than handing the URL to Target.createTarget: the target
+            # appears before that navigation commits, so the page came back without its URL
+            # or content, and under Patchright 1.60 never left about:blank (issue #38).
+            await self._maybe_await(page.goto(url, wait_until="domcontentloaded"))
         return slot
 
-    async def _create_new_window_page(self, url: str) -> Any:
+    async def _create_new_window_page(self) -> Any:
         context = self._context()
         excluded_page_ids = {id(page) for page in self._open_managed_pages()}
         session = None
@@ -450,13 +454,13 @@ class PatchrightRuntime:
             # Background: a foreground window activates Chrome and steals focus from the
             # user's app (measured on macOS). Thread.focus() raises a window on request.
             response = await self._maybe_await(
-                session.send("Target.createTarget", {"url": url, "newWindow": True, "background": True})
+                session.send("Target.createTarget", {"url": BLANK_PAGE_URL, "newWindow": True, "background": True})
             )
             target_id = response.get("targetId") if isinstance(response, dict) else None
             if not isinstance(target_id, str) or not target_id:
-                raise RuntimeError(f"Patchright CDP Target.createTarget returned no valid target for {url!r}")
+                raise RuntimeError("Patchright CDP Target.createTarget returned no valid target")
             try:
-                return await self._wait_for_created_target_page(context, url, excluded_page_ids, target_id)
+                return await self._wait_for_created_target_page(context, excluded_page_ids, target_id)
             except Exception:
                 await self._best_effort_close_target(session, target_id)
                 raise
@@ -479,7 +483,7 @@ class PatchrightRuntime:
                     raise
 
     async def _wait_for_created_target_page(
-        self, context: Any, url: str, excluded_page_ids: set[int], target_id: str
+        self, context: Any, excluded_page_ids: set[int], target_id: str
     ) -> Any:
         deadline = time.monotonic() + CDP_NEW_WINDOW_TIMEOUT_S
         while time.monotonic() < deadline:
@@ -493,7 +497,7 @@ class PatchrightRuntime:
                     return page
             await asyncio.sleep(CDP_NEW_WINDOW_POLL_INTERVAL_S)
         raise RuntimeError(
-            f"Patchright CDP Target.createTarget did not expose target {target_id!r} for {url!r}"
+            f"Patchright CDP Target.createTarget did not expose target {target_id!r}"
         )
 
     async def _require_unzoomed(self, page: Any) -> None:

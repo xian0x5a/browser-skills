@@ -82,7 +82,9 @@ def surf_environment(short_tmp_path: Path):
                     os.kill(pid, signal.SIGKILL)
 
 
-def run_fresh_script(code: str, environment: dict[str, str], directory: Path) -> tuple[str, str]:
+def run_fresh_script(
+    code: str, environment: dict[str, str], directory: Path, *, expect_failure: bool = True
+) -> tuple[str, str]:
     """Run code as an ordinary script; returns (caller file name, stderr)."""
     script = directory / "caller_script.py"
     script.write_text(code)
@@ -91,11 +93,13 @@ def run_fresh_script(code: str, environment: dict[str, str], directory: Path) ->
         env=environment, cwd=directory, capture_output=True, text=True,
         timeout=SUBPROCESS_TIMEOUT_S,
     )
-    assert result.returncode != 0, result.stderr
+    assert (result.returncode != 0) == expect_failure, result.stderr
     return str(script), result.stderr
 
 
-def run_session_cell(code: str, environment: dict[str, str], directory: Path) -> tuple[str, str]:
+def run_session_cell(
+    code: str, environment: dict[str, str], directory: Path, *, expect_failure: bool = True
+) -> tuple[str, str]:
     """Run code as the first cell of a new session, then kill it; returns ("<cell>", stderr)."""
     def session_request(request: dict, **kwargs) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -109,7 +113,7 @@ def run_session_cell(code: str, environment: dict[str, str], directory: Path) ->
     assert session_id, result.stdout + result.stderr
     killed = session_request({"op": "kill", "session": session_id.group(1)})
     assert killed.returncode == 0, killed.stderr
-    assert result.returncode != 0, result.stderr
+    assert (result.returncode != 0) == expect_failure, result.stderr
     return "<cell>", result.stderr
 
 
@@ -183,6 +187,70 @@ def test_other_error_keeps_full_traceback(run_mode, surf_environment, short_tmp_
     assert "Traceback (most recent call last):" in stderr, stderr
     printed_frames = frames(stderr)
     assert (caller_file, "<module>") in printed_frames, stderr
+    assert (caller_file, "read_region") in printed_frames, stderr
+    assert any(is_surf_frame(file) for file, _ in printed_frames), stderr
+    assert any(line.startswith("ValueError: ") for line in stderr.splitlines()), stderr
+
+
+# The caller starts a thread of its own; a Surf error ends that thread, not the script.
+THREAD_NAME = "reader-thread"
+SURF_ERROR_IN_THREAD = """\
+import threading
+from surf_agent import Thread
+
+def read_title(thread):
+    return thread.evaluate("document.title")
+
+def work():
+    read_title(Thread("tracebacks"))
+
+worker = threading.Thread(target=work, name="reader-thread")
+worker.start()
+worker.join()
+"""
+
+NON_SURF_ERROR_IN_THREAD = """\
+import threading
+from surf_agent import Thread
+
+def read_region(thread):
+    return thread.text("")
+
+def work():
+    read_region(Thread("tracebacks"))
+
+worker = threading.Thread(target=work, name="reader-thread")
+worker.start()
+worker.join()
+"""
+
+
+@pytest.mark.parametrize("run_mode", RUN_MODES.values(), ids=RUN_MODES.keys())
+def test_surf_error_in_caller_thread_prints_only_caller_frames_and_summary(
+    run_mode, surf_environment, short_tmp_path
+):
+    caller_file, stderr = run_mode(
+        SURF_ERROR_IN_THREAD, surf_environment, short_tmp_path, expect_failure=False
+    )
+
+    lines = stderr.splitlines()
+    assert f"Exception in thread {THREAD_NAME}:" in lines, stderr
+    printed_frames = frames(stderr)
+    assert {file for file, _ in printed_frames} == {caller_file}, stderr
+    assert [function for _, function in printed_frames] == ["work", "read_title"], stderr
+    summaries = [line for line in lines if line.startswith("BridgeToolError [wait_timeout]: ")]
+    assert summaries and BRIDGE_FAILURE in summaries[0], stderr
+
+
+@pytest.mark.parametrize("run_mode", RUN_MODES.values(), ids=RUN_MODES.keys())
+def test_other_error_in_caller_thread_keeps_full_traceback(run_mode, surf_environment, short_tmp_path):
+    caller_file, stderr = run_mode(
+        NON_SURF_ERROR_IN_THREAD, surf_environment, short_tmp_path, expect_failure=False
+    )
+
+    assert f"Exception in thread {THREAD_NAME}:" in stderr.splitlines(), stderr
+    assert "Traceback (most recent call last):" in stderr, stderr
+    printed_frames = frames(stderr)
     assert (caller_file, "read_region") in printed_frames, stderr
     assert any(is_surf_frame(file) for file, _ in printed_frames), stderr
     assert any(line.startswith("ValueError: ") for line in stderr.splitlines()), stderr

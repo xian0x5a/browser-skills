@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import time
 from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
@@ -62,6 +63,49 @@ def test_back_returns_dom_ready_for_cached_and_reloaded_history(tmp_path, monkey
         restored = runtime._run(page.evaluate("document.documentElement.dataset.restored"))
         assert restored == ("true" if use_bfcache else None)
         assert "First page" in runtime.call("text", {})
+    finally:
+        runtime.stop()
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
+
+
+SLOW_PAGE_DELAY_S = 1.0
+SLOW_PAGE_BODY = b"<title>Slow page</title><body>Slow page body</body>"
+
+
+class SlowPageHandler(BaseHTTPRequestHandler):
+    """Serves a known page only after a delay, so navigation commits well after the window exists."""
+
+    def do_GET(self) -> None:
+        time.sleep(SLOW_PAGE_DELAY_S)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(SLOW_PAGE_BODY)))
+        self.end_headers()
+        self.wfile.write(SLOW_PAGE_BODY)
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+@pytest.mark.skipif(
+    os.environ.get("SURF_TEST_LIVE_PATCHRIGHT") != "1",
+    reason="requires installed Chrome and Patchright; set SURF_TEST_LIVE_PATCHRIGHT=1",
+)
+def test_open_on_a_new_thread_returns_after_its_slow_page_is_dom_ready(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowPageHandler)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    url = f"http://127.0.0.1:{server.server_port}/slow"
+    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True)
+    try:
+        result = runtime.call("open", {"url": url})
+
+        assert result == f"opened {url}\n"
+        page = runtime.pages["default"].page
+        assert runtime._run(page.evaluate("document.title")) == "Slow page"
+        assert runtime._run(page.evaluate("document.readyState")) != "loading"
     finally:
         runtime.stop()
         server.shutdown()

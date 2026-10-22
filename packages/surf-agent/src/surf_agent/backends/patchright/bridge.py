@@ -14,7 +14,7 @@ from pathlib import Path
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 from platformdirs import PlatformDirs
-from typing import Any
+from typing import Any, NoReturn
 from ...constants import DEFAULT_PATCHRIGHT_APP_ID, DEFAULT_WAIT_TIMEOUT_MS, PATCHRIGHT_BACKEND
 from ...errors import ErrorCode
 from .constants import CONTEXT_RESTART_REQUIRED
@@ -440,9 +440,9 @@ class PatchrightRuntime:
         except Exception as exc:
             if not self._is_closed_target_error(exc):
                 raise
-            # Manual window close can close the whole persistent context; recreate it.
+            # Manual window close can close the whole persistent context; the client
+            # relaunches it in a fresh bridge process and retries the request.
             await self._restart_closed_context()
-            page = await self._create_new_window_page()
         slot = PageSlot(page=page, page_id=self._next_page_id)
         self._next_page_id += 1
         self.pages[thread] = slot
@@ -590,7 +590,7 @@ class PatchrightRuntime:
     def _page_url(self, page: Any) -> str:
         return str(getattr(page, "url", "") or "")
 
-    async def _restart_closed_context(self) -> None:
+    async def _restart_closed_context(self) -> NoReturn:
         # This runtime cannot safely invoke the CLI process's lifecycle coordinator:
         # Patchright objects are thread-affine and this is the bridge server thread.
         # Stop and request a fresh bridge process so LocalBridgeClient.before_start

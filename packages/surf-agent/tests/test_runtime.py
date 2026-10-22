@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import surf_agent.backends.patchright.bridge as patchright_bridge
 from surf_agent.backends.patchright.bridge import PageSlot, PatchrightRuntime
+from surf_agent.backends.patchright.constants import CONTEXT_RESTART_REQUIRED
 from surf_agent.errors import BridgeUnavailable
 from surf_agent.snapshots import SnapshotCapture, choose_snapshot_diff
 from surf_agent.runtime import (
@@ -196,94 +197,49 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
 
-    def test_patchright_new_page_restarts_closed_context_then_retries_cdp(self):
-        class FakePage:
-            def __init__(self, url="about:blank", *, target_id="page-target"):
-                self.url = url
-                self.target_id = target_id
-                self.closed = False
-
-            def is_closed(self):
-                return self.closed
-
-            def close(self):
-                self.closed = True
-
-            def goto(self, url, wait_until=None):
-                self.url = url
-
+    def test_patchright_new_page_hands_closed_context_to_bridge_restart(self):
         class FakeSession:
-            def __init__(self, context, page):
+            def __init__(self, context):
                 self.context = context
-                self.page = page
-                self.detached = False
 
             def send(self, method, params=None):
-                if method == "Target.getTargetInfo":
-                    return {"targetInfo": {"targetId": self.page.target_id}}
-                if method == "Page.resetNavigationHistory":
-                    return {}
                 self.context.cdp_calls.append((method, params))
-                if self.context.fail_closed:
-                    raise RuntimeError(patchright_bridge.CLOSED_TARGET_MESSAGE)
-                page = FakePage(params["url"], target_id="target-1")
-                self.context.pages.append(page)
-                return {"targetId": "target-1"}
+                raise RuntimeError(patchright_bridge.CLOSED_TARGET_MESSAGE)
 
             def detach(self):
-                self.detached = True
+                pass
 
-        class FakeContext:
-            def __init__(self, *, fail_closed=False):
+        class ClosedContext:
+            def __init__(self):
                 self.pages = []
                 self.cdp_calls = []
-                self.fail_closed = fail_closed
-                self.new_page_calls = 0
                 self.browser = types.SimpleNamespace(
-                    new_browser_cdp_session=lambda: FakeSession(self, None)
+                    new_browser_cdp_session=lambda: FakeSession(self)
                 )
 
             def new_page(self):
-                self.new_page_calls += 1
-                page = FakePage()
-                self.pages.append(page)
-                return page
+                raise AssertionError("closed context must not open a page")
 
-            def new_cdp_session(self, page):
-                return FakeSession(self, page)
-
-        first_context = FakeContext(fail_closed=True)
-        second_context = FakeContext()
+        closed_context = ClosedContext()
         runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
-        runtime.browser_or_context = first_context
-        restarts = []
+        runtime.browser_or_context = closed_context
+        stops = []
 
-        async def restart():
-            restarts.append(True)
-            runtime.browser_or_context = second_context
+        async def stop():
+            stops.append(True)
+            runtime.browser_or_context = None
+            return "stopped\n"
 
-        with patch.object(runtime, "_restart_closed_context", side_effect=restart):
-            slot = runtime._run(
-                runtime._new_page("thread", url="https://welcome.test/")
-            )
+        runtime._stop_async = stop
+        # The bridge cannot relaunch in-process; the client restarts it and retries.
+        with self.assertRaisesRegex(RuntimeError, CONTEXT_RESTART_REQUIRED):
+            runtime._run(runtime._new_page("thread", url="https://welcome.test/"))
 
-        self.assertEqual(len(restarts), 1)
-        self.assertEqual(slot.page.url, "https://welcome.test/")
+        self.assertEqual(len(stops), 1)
+        self.assertTrue(runtime.restart_requested)
+        self.assertNotIn("thread", runtime.pages)
         self.assertEqual(
-            first_context.cdp_calls,
-            [
-                (
-                    "Target.createTarget",
-                    {
-                        "url": "about:blank",
-                        "newWindow": True,
-                        "background": True,
-                    },
-                )
-            ],
-        )
-        self.assertEqual(
-            second_context.cdp_calls,
+            closed_context.cdp_calls,
             [
                 (
                     "Target.createTarget",

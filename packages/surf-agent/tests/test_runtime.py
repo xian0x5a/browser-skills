@@ -1012,3 +1012,40 @@ def test_find_chrome_bin_finds_the_macos_app_bundle_as_one_command_word() -> Non
         found = find_chrome_bin()
     # Callers shlex-split the configured executable, so the space must survive.
     assert found is not None and shlex.split(found) == [bundle]
+
+
+def test_snapshot_masks_an_input_value_whose_ref_the_browser_cannot_resolve() -> None:
+    """Fail closed: a value on a textbox line must not survive when we cannot prove it is not a password."""
+
+    class UnresolvableLocator:
+        def __getattr__(self, name):
+            def fail(*args, **kwargs):
+                raise RuntimeError("stale ref")
+
+            return fail
+
+    class FakePage:
+        def is_closed(self):
+            return False
+
+        def aria_snapshot(self, **kwargs):
+            return '- textbox "Secret" [ref=e8]: hunter2secret\n- button "Go" [ref=e9]'
+
+        def locator(self, selector):
+            return UnresolvableLocator()
+
+        def __getattr__(self, name):
+            def fail(*args, **kwargs):
+                raise RuntimeError("unavailable")
+
+            return fail
+
+    runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+    runtime.browser_or_context = object()
+    runtime.pages["thread"] = PageSlot(page=FakePage(), page_id=1)
+
+    snapshot = runtime.call("snapshot", {"thread": "thread"})
+
+    assert "hunter2secret" not in snapshot
+    assert "\u2022" * 8 in snapshot
+    assert 'button "Go" [ref=e9]' in snapshot

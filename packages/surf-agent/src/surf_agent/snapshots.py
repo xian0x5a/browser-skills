@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
@@ -11,6 +13,36 @@ from .constants import (
     SNAPSHOT_DIFF_MAX_HUNKS,
     SNAPSHOT_DIFF_MAX_RATIO,
     SNAPSHOT_DIFF_MIN_SAVED_CHARS,
+)
+
+MASKED_PASSWORD = "••••••••"
+
+# The roles a password input can render as. The tree prints no input type, so a
+# line can only name a candidate; the browser decides whether it is a password.
+_INPUT_VALUE_LINE = re.compile(
+    r"""
+    (?P<prefix>
+        (?P<indent>\ *)-\ '?                    # YAML quotes a key that needs it
+        (?:textbox|searchbox|combobox|spinbutton)
+        (?:\ "(?:[^"\\]|\\.)*")?                # accessible name
+        (?P<attributes>(?:\ \[[^\]]*\])*)'?:\ ?
+    )
+    (?P<value>.*)
+    """,
+    re.VERBOSE,
+)
+_REF_ATTRIBUTE = re.compile(r" \[ref=([^\]]+)\]")
+# These roles build their accessible name from their descendants, which embeds an
+# input's value. Other roles keep their names: those come from the page's author.
+_NAMED_FROM_CONTENT_LINE = re.compile(
+    r"""
+    ^(?P<node>\ *-\ '?(?:
+        button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox
+        |menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem
+    ))
+    \ "(?:[^"\\]|\\.)*"
+    """,
+    re.VERBOSE,
 )
 
 
@@ -25,10 +57,67 @@ class SnapshotCapture:
 
 
 @dataclass(frozen=True)
+class InputValueLine:
+    index: int
+    prefix: str
+    ref: str | None
+
+
+@dataclass(frozen=True)
 class SnapshotDiffDecision:
     output: str
     used_diff: bool
     reason: str
+
+
+def input_value_lines(snapshot_text: str) -> list[InputValueLine]:
+    """Find the lines where a snapshot prints the value of a text-like input."""
+    lines = snapshot_text.split("\n")
+    found: list[InputValueLine] = []
+    for index, line in enumerate(lines):
+        node = _INPUT_VALUE_LINE.fullmatch(line)
+        if node is None:
+            continue
+        ref_attribute = _REF_ATTRIBUTE.search(node["attributes"])
+        ref = ref_attribute[1] if ref_attribute else None
+        if node["value"]:
+            found.append(InputValueLine(index, node["prefix"], ref))
+            continue
+        # Next to a placeholder the value moves to a nested "- text:" line.
+        child_indent = node["indent"] + "  "
+        text_prefix = child_indent + "- text: "
+        for child_index in range(index + 1, len(lines)):
+            child = lines[child_index]
+            if not child.startswith(child_indent):
+                break
+            if child.startswith(text_prefix):
+                found.append(InputValueLine(child_index, text_prefix, ref))
+                break
+    return found
+
+
+def mask_input_values(snapshot_text: str, value_lines: list[InputValueLine]) -> str:
+    lines = snapshot_text.split("\n")
+    for value_line in value_lines:
+        lines[value_line.index] = value_line.prefix + MASKED_PASSWORD
+        for ancestor_index in _ancestor_indexes(lines, value_line.index):
+            lines[ancestor_index] = _NAMED_FROM_CONTENT_LINE.sub(
+                rf'\g<node> "{MASKED_PASSWORD}"', lines[ancestor_index]
+            )
+    return "\n".join(lines)
+
+
+def _ancestor_indexes(lines: list[str], index: int) -> Iterator[int]:
+    indent = _indent(lines[index])
+    for ancestor_index in range(index - 1, -1, -1):
+        ancestor_indent = _indent(lines[ancestor_index])
+        if ancestor_indent < indent:
+            indent = ancestor_indent
+            yield ancestor_index
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
 
 
 def snapshot_capture_from_page(*, text: str, page: AgentPage) -> SnapshotCapture:

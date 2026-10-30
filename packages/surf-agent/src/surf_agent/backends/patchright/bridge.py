@@ -17,6 +17,7 @@ from platformdirs import PlatformDirs
 from typing import Any, NoReturn
 from ...constants import DEFAULT_PATCHRIGHT_APP_ID, DEFAULT_WAIT_TIMEOUT_MS, PATCHRIGHT_BACKEND
 from ...errors import ErrorCode
+from ...snapshots import input_value_lines, mask_input_values
 from .constants import CONTEXT_RESTART_REQUIRED
 from .launch_args import STARTUP_PAGE_ARG, capture_default_args, keep_disposable_data_out_of_profile
 from .network_capture import NetworkCapture
@@ -40,6 +41,14 @@ SNAPSHOT_BODY_TIMEOUT_MS = 3_000
 ACTION_TIMEOUT_MS = 5_000
 # Short: probes run after the action already waited ACTION_TIMEOUT_MS.
 ACTIONABILITY_PROBE_TIMEOUT_MS = 250
+# A password can sit in a value attribute: prefilled, or synced there by a framework.
+# Copying into an inert document keeps a read from running custom element constructors.
+HTML_WITHOUT_PASSWORD_VALUES_SCRIPT = """() => {
+  if (!document.documentElement) return "";
+  const root = document.implementation.createHTMLDocument("").importNode(document.documentElement, true);
+  for (const field of root.querySelectorAll("input[type=password i]")) field.removeAttribute("value");
+  return root.outerHTML;
+}"""
 WAIT_POLL_INTERVAL_S = 0.1
 # Returns a description of the element receiving pointer events at the target's
 # center, or null when the target (or its shadow content) receives them itself.
@@ -620,17 +629,17 @@ class PatchrightRuntime:
         try:
             text = await self._maybe_await(page.locator("body").inner_text(timeout=SNAPSHOT_BODY_TIMEOUT_MS))
         except Exception:
-            text = await self._maybe_await(page.content())
+            text = await self._maybe_await(page.evaluate(HTML_WITHOUT_PASSWORD_VALUES_SCRIPT))
         return text + ("" if text.endswith("\n") else "\n")
 
     async def _snapshot(self, slot: PageSlot) -> str:
         page = slot.page
         parts = ["snapshot:"]
         try:
-            aria = await self._aria_snapshot(page)
+            aria = await self._mask_passwords(page, await self._aria_snapshot(page))
         except Exception:
             try:
-                aria = await self._aria_snapshot(page.locator("body"))
+                aria = await self._mask_passwords(page, await self._aria_snapshot(page.locator("body")))
             except Exception:
                 aria = (await self._body_text(page)).strip()
         if aria:
@@ -652,6 +661,32 @@ class PatchrightRuntime:
                 return str(await self._maybe_await(target.aria_snapshot(mode="ai", timeout=SNAPSHOT_ARIA_TIMEOUT_MS)))
             except TypeError:
                 return str(await self._maybe_await(target.aria_snapshot(timeout=SNAPSHOT_ARIA_TIMEOUT_MS)))
+
+    async def _mask_passwords(self, page: Any, snapshot_text: str) -> str:
+        value_lines = input_value_lines(snapshot_text)
+        may_hold_password = await asyncio.gather(
+            *(self._may_hold_password(page, value_line.ref) for value_line in value_lines)
+        )
+        return mask_input_values(
+            snapshot_text,
+            [value_line for value_line, masked in zip(value_lines, may_hold_password, strict=True) if masked],
+        )
+
+    async def _may_hold_password(self, page: Any, ref: str | None) -> bool:
+        # Identify the field by element, not by comparing values: a fill can change
+        # the value between two reads, and a stale ref then masks instead of leaking.
+        # Without a ref the element is unreachable (e.g. pointer-events: none).
+        if ref is None:
+            return True
+        try:
+            # All probes share the wait, so a page with thousands of inputs needs the
+            # snapshot's full budget or its text fields would mask at random.
+            field_type = await self._maybe_await(
+                page.locator(f"aria-ref={ref}").evaluate("element => element.type", timeout=SNAPSHOT_ARIA_TIMEOUT_MS)
+            )
+        except Exception:
+            return True
+        return field_type == "password"
 
     async def _fill_or_select(self, locator: Any, text: str) -> None:
         # Playwright's fill rejects <select>; agents reach for fill on dropdowns,

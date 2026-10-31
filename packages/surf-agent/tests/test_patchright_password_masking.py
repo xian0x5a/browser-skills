@@ -446,3 +446,124 @@ def test_secret_stays_hidden_in_a_frame_attached_between_calls_and_removed_after
     snapshot = snapshot_of(runtime)
     assert "Marker" in snapshot
     assert "S3cr3t-late-frame" not in snapshot, snapshot
+
+
+# Fields the page masks with CSS rather than type=password. The page has no password field.
+MASKED = "-webkit-text-security:disc"
+CSS_MASKED_FIELDS = [
+    ("CssInline", f'<input id="m0" type="text" style="{MASKED}" aria-label="CssInline">'),
+    ("CssClass", '<input id="m1" type="text" class="masked" aria-label="CssClass">'),
+    ("CssArea", f'<textarea id="m2" style="{MASKED}" aria-label="CssArea"></textarea>'),
+    ("CssCircle", '<input id="m3" type="text" style="-webkit-text-security:circle" aria-label="CssCircle">'),
+    ("CssSquare", '<input id="m4" type="text" style="-webkit-text-security:square" aria-label="CssSquare">'),
+    ("CssNumeric", f'<input id="m5" type="text" inputmode="numeric" style="{MASKED}" aria-label="CssNumeric">'),
+    ("CssNested", f'<input id="m6" type="text" style="{MASKED}" aria-label="CssNested" placeholder="Enter it">'),
+]
+CSS_MASKED_NO_REF = ("CssNoRef", "S3cr3t-css-noref")
+CSS_MASKED_SHADOW = ("CssShadow", "S3cr3t-css-shadow")
+CSS_MASKED_FRAME = ("CssFrame", "S3cr3t-css-frame")
+
+CSS_MASKED_PAGE = (
+    "<style>.masked{-webkit-text-security:disc}</style>"
+    + "".join(html for _, html in CSS_MASKED_FIELDS)
+    + f'<input id="noref" type="text" style="{MASKED};pointer-events:none" aria-label="{CSS_MASKED_NO_REF[0]}">'
+    + '<div id="host"></div>'
+    + f"<script>host.attachShadow({{mode:'open'}}).innerHTML='<input type=text style={MASKED} aria-label={CSS_MASKED_SHADOW[0]}>'</script>"
+    + f"<iframe id=\"frame\" srcdoc='<input type=text style={MASKED} aria-label={CSS_MASKED_FRAME[0]}>'></iframe>"
+)
+
+
+def test_css_masked_fields_render_only_the_mask(runtime, site):
+    open_page(runtime, site, CSS_MASKED_PAGE)
+    secrets = {}
+    for i, (label, _) in enumerate(CSS_MASKED_FIELDS):
+        secrets[label] = f"S3cr3t-css-{i}"
+        assert runtime.call("fill", {"uid": f"#m{i}", "text": secrets[label]}) == "filled\n"
+    secrets[CSS_MASKED_NO_REF[0]] = CSS_MASKED_NO_REF[1]
+    secrets[CSS_MASKED_SHADOW[0]] = CSS_MASKED_SHADOW[1]
+    secrets[CSS_MASKED_FRAME[0]] = CSS_MASKED_FRAME[1]
+    runtime.call(
+        "eval",
+        {
+            "code": f"""() => {{
+  noref.value = {js(CSS_MASKED_NO_REF[1])};
+  host.shadowRoot.querySelector('input').value = {js(CSS_MASKED_SHADOW[1])};
+  frame.contentDocument.querySelector('input').value = {js(CSS_MASKED_FRAME[1])};
+}}"""
+        },
+    )
+    snapshot = snapshot_of(runtime)
+
+    problems = []
+    for label, secret in secrets.items():
+        block = field_block(snapshot, label)
+        if secret in snapshot:
+            problems.append(f"{label}: value visible in\n{block}")
+        if MASK not in block or re.search("•{9,}", block):
+            problems.append(f"{label}: exact mask missing in\n{block}")
+    assert not problems, "\n\n".join(problems) + f"\n\nfull snapshot:\n{snapshot}"
+
+
+def test_css_masked_value_does_not_leak_through_ancestor_names(runtime, site):
+    html = (
+        f'<table style="pointer-events:none"><tr><td>Code</td><td><input id="m" type="text" style="{MASKED}"'
+        ' aria-label="CssTable"></td></tr></table>'
+    )
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": f"() => {{ m.value = {js(LEAK)}; }}"})
+    snapshot = snapshot_of(runtime)
+    assert LEAK not in snapshot, snapshot
+
+
+def test_unmasked_fields_keep_their_values_beside_css_masked_ones(runtime, site):
+    html = (
+        f'<input id="a" type="text" style="{MASKED}" aria-label="CssMasked">'
+        '<input id="b" type="text" style="-webkit-text-security:none" aria-label="CssNone">'
+        '<input id="c" type="text" aria-label="Ordinary">'
+    )
+    open_page(runtime, site, html)
+    runtime.call("fill", {"uid": "#a", "text": "S3cr3t-css-masked"})
+    runtime.call("fill", {"uid": "#b", "text": "visible-none"})
+    runtime.call("fill", {"uid": "#c", "text": "visible-ordinary"})
+    snapshot = snapshot_of(runtime)
+    assert "visible-none" in field_block(snapshot, "CssNone")
+    assert "visible-ordinary" in field_block(snapshot, "Ordinary")
+
+
+def test_html_fallback_omits_css_masked_values(runtime, site, forced_html_fallback):
+    html = (
+        f'<p>Fallback marker</p><input type="text" style="{MASKED}" value="CSSATTR">'
+        f'<textarea style="{MASKED}">CSSBODY</textarea><input type="text" value="ORDINARYATTR">'
+    )
+    open_page(runtime, site, html)
+    snapshot = snapshot_of(runtime)
+    assert "Fallback marker" in snapshot
+    assert "ORDINARYATTR" in snapshot
+    assert "CSSATTR" not in snapshot
+    assert "CSSBODY" not in snapshot
+
+
+def test_css_masked_field_ref_still_fills(runtime, site):
+    open_page(runtime, site, f'<input id="m" type="text" style="{MASKED}" aria-label="CssRef">')
+    runtime.call("fill", {"uid": "#m", "text": "S3cr3t-css-first"})
+    snapshot = snapshot_of(runtime)
+    assert runtime.call("fill", {"uid": f"@{ref_of(snapshot, 'CssRef')}", "text": "new"}) == "filled\n"
+    assert runtime.call("eval", {"code": "() => m.value"}).strip().strip('"') == "new"
+
+
+def test_closed_shadow_root_fields_stay_out_of_the_snapshot(runtime, site):
+    # The secret-field scan cannot see into a closed root. It is safe only while the
+    # tree cannot either, so a driver upgrade that changes this must fail here.
+    open_page(
+        runtime,
+        site,
+        "<p>Marker</p><div id=host></div><script>"
+        "host.attachShadow({mode: 'closed'}).innerHTML = "
+        "'<input type=password value=S3cr3t-closed-root>';"
+        "</script>",
+    )
+
+    snapshot = snapshot_of(runtime)
+
+    assert "Marker" in snapshot
+    assert "S3cr3t-closed-root" not in snapshot

@@ -14,10 +14,10 @@ from .constants import (
     SNAPSHOT_DIFF_MIN_SAVED_CHARS,
 )
 
-MASKED_PASSWORD = "••••••••"
+MASKED_VALUE = "••••••••"
 
-# The roles a password input can render as. The tree prints no input type, so a
-# line can only name a candidate; the browser decides whether it is a password.
+# The roles a secret field can render as. The tree prints no input type, so a
+# line can only name a candidate; the browser decides whether it is a secret.
 _INPUT_VALUE_LINE = re.compile(
     r"""
     (?P<prefix>
@@ -103,10 +103,10 @@ def mask_input_values(snapshot_text: str, value_lines: list[InputValueLine]) -> 
     for index in range(len(lines) - 1, -1, -1):
         indent = len(lines[index]) - len(lines[index].lstrip(" "))
         if index in value_prefixes:
-            lines[index] = value_prefixes[index] + MASKED_PASSWORD
+            lines[index] = value_prefixes[index] + MASKED_VALUE
             masked_indent = max(masked_indent, indent)
         elif indent < masked_indent:
-            lines[index] = _NAMED_FROM_CONTENT_LINE.sub(rf'\g<node> "{MASKED_PASSWORD}"', lines[index])
+            lines[index] = _NAMED_FROM_CONTENT_LINE.sub(rf'\g<node> "{MASKED_VALUE}"', lines[index])
             masked_indent = indent
     return "\n".join(lines)
 

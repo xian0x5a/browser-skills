@@ -32,6 +32,7 @@ Probed on a local page with Patchright 1.64.1:
 - An accessible name can embed a password value. Playwright drops an ancestor's redundant name only when both nodes have refs, so a form locked with `pointer-events: none` during submit prints `row "Password hunter2"` above the field. A password field labelling another control (`aria-labelledby`, or a `<label for>` wrapping it) does the same.
 - `<input type=password role=button>` also prints its value: any explicit role can carry one.
 - `cloneNode` on the live document runs custom element constructors, so the HTML fallback copies into an inert document instead.
+- `page.frames` updates only while the event loop runs, and the bridge runs it only inside a call. A frame attached between calls is missing until one round trip delivers the event.
 
 ## Decisions
 
@@ -46,12 +47,25 @@ Weighted options, scored 1-5:
 | **Total**                                     | **4.05**                | **2.60**                     | **3.60**                  |
 
 - Chosen: find the lines that print an input value, then ask the browser whether each ref is a password field. Identity needs no secret outside the browser and has no race with a fill, because a stale ref masks.
-- Fail closed: no ref, a stale ref or a failed probe all mask. A text input without a ref loses its value in the snapshot, which costs little because refless nodes cannot be targeted anyway.
+- Fail closed: on a page with a password field, no ref, a stale ref or a failed probe all mask. A text input without a ref loses its value there, which costs little because refless nodes cannot be targeted anyway.
 - Rejected, scrubbing values: a short password rewrites refs and page text, the dots then reveal the password by position, and a value that changes between the two reads leaks.
 - Rejected, patching the injected script: it forks the driver for every upgrade.
 - Ancestor names: a masked line also masks the name of each ancestor whose role builds its name from content. It needs no secret, and author-given names such as `form "Login"` survive.
 - Not covered: a password field inside the element that provides another node's name (`aria-labelledby`, `<legend>`, `<caption>`, `<figcaption>`, `<summary>`, a `<label>` for another control), when a missing ref keeps that name; and a password input under a role no text input uses. Both need odd markup. The text cannot tell the first from an author's name without masking those too, and probing every line for the second costs one round trip per paragraph.
-- Probes share the snapshot's 3 s budget, so a stale ref can hold one snapshot for 3 s during navigation. Probe time grows faster than the input count: about 5.6 s at 8,000 filled inputs and 17 s at 16,000, past the 15 s command timeout. Accepted, because only huge grids reach it.
+- Probes share the snapshot's 3 s budget, so a stale ref can hold one snapshot for 3 s during navigation.
+- Normal fields pay nothing (#48). Each probe costs about 1 ms, which reached 15 s at 16,000 filled text inputs on a page with no password. One selector count per frame took 168 ms on that page, and 3-20 ms on ordinary pages, so probes now run only when a password field exists. The count runs before and after the ARIA read: only after would miss a field a submit removes, and only before would miss one rendered during the read. A timeout or a raised error fails closed; a retriable error during navigation counts as zero, because `queryCount` swallows it. A field that exists only between the two counts stays a gap: it must render, hold a value and vanish within one read. On a hung page the count adds up to 3 s, for about 12 s in the worst case, still under the 15 s command timeout.
+
+T3 Code's browser (`ServerBrowserPage.ts`) was compared before settling #48. It scrubs known values, the option rejected above, and handles that option's weaknesses: it reads values before and after the tree and fails the snapshot if they changed, adds word boundaries for short values, and keeps roles and attributes out of the scrub. It also reaches names and CSS-masked fields, which #46 and #47 closed as won't fix. Copying it would add per-frame readers and page-changed errors for coverage this project declined, so the per-ref probe stays.
+
+Options for #48, scored 1-5:
+
+| Criterion (weight)                | Tolerate | Count first | T3 value scrub |
+| --------------------------------- | -------- | ----------- | -------------- |
+| Normal fields do not pay (35%)    | 2        | 5           | 4              |
+| No leak (35%)                     | 5        | 4           | 3              |
+| Simplicity (20%)                  | 5        | 4           | 1              |
+| Ordinary page latency (10%)       | 5        | 4           | 3              |
+| **Total**                         | **3.95** | **4.35**    | **2.95**       |
 
 ## Work Plan
 
@@ -67,8 +81,8 @@ Weighted options, scored 1-5:
 
 ## Progress
 
-- Regression tests written first by an independent agent; two review rounds; all checks below pass.
+- Regression tests written first by an independent agent; four review rounds; all checks below pass.
 
 ## Outcomes & Retrospective
 
-Snapshots mask password values in every field shape probed, in the ARIA tree, in enclosing content-named ancestors and in the HTML fallback. Review caught the ancestor-name leak after the first version passed its tests: masking one line was not enough, because the value also reaches names above it. The first custom element test could not fail, since `eval` does not see `window` state set by page scripts; a mutation check exposed it, and it now counts in the DOM.
+Snapshots mask password values in every field shape probed, in the ARIA tree, in enclosing content-named ancestors and in the HTML fallback. #48 then removed the cost for normal fields: a 16,000-input page without a password went from over 15 s to 0.81 s, and masking every line from 7.5 s to 3.4 ms. Review caught the ancestor-name leak after the first version passed its tests: masking one line was not enough, because the value also reaches names above it. The first custom element test could not fail, since `eval` does not see `window` state set by page scripts; a mutation check exposed it, and it now counts in the DOM.

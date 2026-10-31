@@ -41,6 +41,7 @@ SNAPSHOT_BODY_TIMEOUT_MS = 3_000
 ACTION_TIMEOUT_MS = 5_000
 # Short: probes run after the action already waited ACTION_TIMEOUT_MS.
 ACTIONABILITY_PROBE_TIMEOUT_MS = 250
+PASSWORD_FIELD_SELECTOR = "input[type=password i]"
 # A password can sit in a value attribute: prefilled, or synced there by a framework.
 # Copying into an inert document keeps a read from running custom element constructors.
 HTML_WITHOUT_PASSWORD_VALUES_SCRIPT = """() => {
@@ -635,11 +636,14 @@ class PatchrightRuntime:
     async def _snapshot(self, slot: PageSlot) -> str:
         page = slot.page
         parts = ["snapshot:"]
+        password_before_read = await self._has_password_field(page)
         try:
-            aria = await self._mask_passwords(page, await self._aria_snapshot(page))
+            aria = await self._mask_passwords(page, await self._aria_snapshot(page), password_before_read)
         except Exception:
             try:
-                aria = await self._mask_passwords(page, await self._aria_snapshot(page.locator("body")))
+                aria = await self._mask_passwords(
+                    page, await self._aria_snapshot(page.locator("body")), password_before_read
+                )
             except Exception:
                 aria = (await self._body_text(page)).strip()
         if aria:
@@ -662,7 +666,26 @@ class PatchrightRuntime:
             except TypeError:
                 return str(await self._maybe_await(target.aria_snapshot(timeout=SNAPSHOT_ARIA_TIMEOUT_MS)))
 
-    async def _mask_passwords(self, page: Any, snapshot_text: str) -> str:
+    async def _has_password_field(self, page: Any) -> bool:
+        try:
+            # The event loop only runs inside a call, so page.frames misses a frame
+            # attached between calls until one round trip delivers the event.
+            await self._maybe_await(page.evaluate("() => 0"))
+            counts = await asyncio.wait_for(
+                asyncio.gather(
+                    *(self._maybe_await(frame.locator(PASSWORD_FIELD_SELECTOR).count()) for frame in page.frames)
+                ),
+                SNAPSHOT_ARIA_TIMEOUT_MS / 1000,
+            )
+        except Exception:
+            return True
+        return any(counts)
+
+    async def _mask_passwords(self, page: Any, snapshot_text: str, password_before_read: bool) -> str:
+        # One query spares normal fields a round trip each. It looks on both sides of
+        # the read: a submit can remove a field just read, or a form can render during it.
+        if not password_before_read and not await self._has_password_field(page):
+            return snapshot_text
         value_lines = input_value_lines(snapshot_text)
         may_hold_password = await asyncio.gather(
             *(self._may_hold_password(page, value_line.ref) for value_line in value_lines)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -341,3 +342,107 @@ def test_html_fallback_survives_a_document_without_root_element(runtime, site, f
     runtime.call("eval", {"code": "() => document.documentElement.remove()"})
     runtime.call("text", {})
     runtime.call("snapshot", {})
+
+
+NO_REF_TEXT = '<input id="t" type="text" style="pointer-events:none" aria-label="NoRefText">'
+NO_REF_TEXT_IN_CELL = (
+    '<table style="pointer-events:none"><tr><td>Label<input id="t" type="text" aria-label="NoRefText"></td></tr></table>'
+)
+
+
+@pytest.mark.parametrize("html", [NO_REF_TEXT, NO_REF_TEXT_IN_CELL], ids=["field", "field-in-cell"])
+def test_page_without_password_prints_refless_text_untouched(runtime, site, html):
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": "() => { t.value = 'visible-noref'; }"})
+    snapshot = snapshot_of(runtime)
+    assert "visible-noref" in field_block(snapshot, "NoRefText")
+    if "<table" in html:
+        # The cell name is derived from its content, which includes the field's value.
+        assert re.search(r'cell "[^"]*visible-noref[^"]*"', snapshot), snapshot
+
+
+@pytest.mark.parametrize(
+    "password_html",
+    [
+        '<input type="password" aria-label="PwMain">',
+        "<iframe srcdoc='<input type=password aria-label=PwOnlyInFrame>'></iframe>",
+    ],
+    ids=["main-frame", "iframe-only"],
+)
+def test_refless_text_stays_masked_when_the_page_has_a_password_field(runtime, site, password_html):
+    open_page(runtime, site, NO_REF_TEXT + password_html)
+    runtime.call("eval", {"code": "() => { t.value = 'hidden-noref'; }"})
+    snapshot = snapshot_of(runtime)
+    assert "hidden-noref" not in snapshot, snapshot
+
+
+def spy_on_aria_snapshot(monkeypatch, *, before=None, after=None):
+    """Run page scripts around the real ARIA read, as a form does while it submits."""
+    original = PatchrightRuntime._aria_snapshot
+
+    async def wrapped(self, target):
+        if before:
+            await target.evaluate(before)
+        text = await original(self, target)
+        if after:
+            await target.evaluate(after)
+        return text
+
+    monkeypatch.setattr(PatchrightRuntime, "_aria_snapshot", wrapped)
+
+
+def test_secret_stays_hidden_when_the_field_is_removed_after_the_read(runtime, site, monkeypatch):
+    open_page(runtime, site, '<input id="pw" type="password" aria-label="PwGone"><p>Marker</p>')
+    runtime.call("fill", {"uid": "#pw", "text": "S3cr3t-removed"})
+    spy_on_aria_snapshot(monkeypatch, after="() => document.getElementById('pw').remove()")
+    snapshot = snapshot_of(runtime)
+    assert "Marker" in snapshot
+    assert "S3cr3t-removed" not in snapshot, snapshot
+
+
+def test_secret_stays_hidden_when_a_field_appears_during_the_read(runtime, site, monkeypatch):
+    open_page(runtime, site, "<p>Marker</p>")
+    insert = (
+        "() => { const i = document.createElement('input'); i.type = 'password';"
+        " i.setAttribute('aria-label', 'PwLate'); i.value = 'S3cr3t-late'; document.body.append(i); }"
+    )
+    spy_on_aria_snapshot(monkeypatch, before=insert)
+    snapshot = snapshot_of(runtime)
+    assert "Marker" in snapshot
+    assert "S3cr3t-late" not in snapshot, snapshot
+
+
+def test_ancestor_names_are_masked_for_every_password_and_only_for_them(runtime, site):
+    html = (
+        '<table style="pointer-events:none">'
+        '<tr><td><input id="p1" type="password" aria-label="PwDirect"></td></tr>'
+        '<tr><td><div><input id="p2" type="password" aria-label="PwNested"></div></td></tr>'
+        "<tr><td>Plain A</td><td>Plain B</td></tr></table>"
+    )
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": "() => { p1.value = 'S3cr3t-one'; p2.value = 'S3cr3t-two'; }"})
+    snapshot = snapshot_of(runtime)
+    assert "S3cr3t" not in snapshot, snapshot
+    assert 'cell "Plain A"' in snapshot
+    assert 'cell "Plain B"' in snapshot
+    assert 'row "Plain A Plain B"' in snapshot
+
+
+def test_secret_stays_hidden_in_a_frame_attached_between_calls_and_removed_after_the_read(
+    runtime, site, monkeypatch
+):
+    # The bridge only refreshes its frame list while a call runs, so a frame the page attaches
+    # on its own timer is unknown to the first password check; removing it after the read
+    # hides it from the second check too.
+    html = (
+        "<p>Marker</p><script>setTimeout(() => {"
+        " const f = document.createElement('iframe'); f.id = 'login';"
+        " f.srcdoc = '<input type=password aria-label=PwLateFrame value=S3cr3t-late-frame>';"
+        " document.body.append(f); }, 100)</script>"
+    )
+    open_page(runtime, site, html)
+    time.sleep(0.6)  # let the page attach the frame; deliberately no bridge call meanwhile
+    spy_on_aria_snapshot(monkeypatch, after="() => document.getElementById('login').remove()")
+    snapshot = snapshot_of(runtime)
+    assert "Marker" in snapshot
+    assert "S3cr3t-late-frame" not in snapshot, snapshot

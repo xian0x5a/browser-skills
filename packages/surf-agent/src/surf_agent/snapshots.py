@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
@@ -98,26 +97,18 @@ def input_value_lines(snapshot_text: str) -> list[InputValueLine]:
 
 def mask_input_values(snapshot_text: str, value_lines: list[InputValueLine]) -> str:
     lines = snapshot_text.split("\n")
-    for value_line in value_lines:
-        lines[value_line.index] = value_line.prefix + MASKED_PASSWORD
-        for ancestor_index in _ancestor_indexes(lines, value_line.index):
-            lines[ancestor_index] = _NAMED_FROM_CONTENT_LINE.sub(
-                rf'\g<node> "{MASKED_PASSWORD}"', lines[ancestor_index]
-            )
+    value_prefixes = {value_line.index: value_line.prefix for value_line in value_lines}
+    # Bottom-up, a line indented less than the masked lines below it is their ancestor.
+    masked_indent = -1
+    for index in range(len(lines) - 1, -1, -1):
+        indent = len(lines[index]) - len(lines[index].lstrip(" "))
+        if index in value_prefixes:
+            lines[index] = value_prefixes[index] + MASKED_PASSWORD
+            masked_indent = max(masked_indent, indent)
+        elif indent < masked_indent:
+            lines[index] = _NAMED_FROM_CONTENT_LINE.sub(rf'\g<node> "{MASKED_PASSWORD}"', lines[index])
+            masked_indent = indent
     return "\n".join(lines)
-
-
-def _ancestor_indexes(lines: list[str], index: int) -> Iterator[int]:
-    indent = _indent(lines[index])
-    for ancestor_index in range(index - 1, -1, -1):
-        ancestor_indent = _indent(lines[ancestor_index])
-        if ancestor_indent < indent:
-            indent = ancestor_indent
-            yield ancestor_index
-
-
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
 
 
 def snapshot_capture_from_page(*, text: str, page: AgentPage) -> SnapshotCapture:

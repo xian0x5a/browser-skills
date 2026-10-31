@@ -1,0 +1,569 @@
+"""Snapshots go to the model, so a password field's value must never appear in one."""
+
+from __future__ import annotations
+
+import os
+import re
+import time
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+
+import pytest
+from patchright.async_api import Locator
+
+from surf_agent.backends.patchright import bridge
+from surf_agent.backends.patchright.bridge import PatchrightRuntime
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("SURF_TEST_LIVE_PATCHRIGHT") != "1",
+    reason="requires installed Chrome and Patchright; set SURF_TEST_LIVE_PATCHRIGHT=1",
+)
+
+MASK = "•" * 8
+YAML_SPECIAL_SECRET = 'a: "b" #c\\d'
+
+# (label, extra attributes, secret). The label is the accessible name via aria-label, so any
+# characters are allowed; the secret is what must never leave the browser.
+LIGHT_DOM_PASSWORDS = [
+    ("PwPlain", "", "S3cr3t-plain"),
+    ("PwFocused", "", "S3cr3t-focused"),
+    ("Password: required #1", "", "S3cr3t-quoted"),
+    ("Dave's secret", "", "S3cr3t-apostrophe"),
+    ("PwNested", 'placeholder="Enter it"', "S3cr3t-nested"),
+    ("PwYaml", "", YAML_SPECIAL_SECRET),
+    ("PwCombobox", 'role="combobox"', "S3cr3t-combobox"),
+    ("PwSearchbox", 'role="searchbox"', "S3cr3t-searchbox"),
+    ("PwSpinbutton", 'role="spinbutton"', "S3cr3t-spinbutton"),
+]
+POINTER_EVENTS_NONE = ("PwNoRef", "S3cr3t-noref")
+TABLE_CELL = ("PwTable", "S3cr3t-table")
+SHADOW = ("PwShadow", "S3cr3t-shadow")
+IFRAME = ("PwFrame", "S3cr3t-frame")
+
+MASKING_PAGE = (
+    "<title>Masking</title><body>"
+    + "".join(
+        f'<input id="light{i}" type="password" aria-label="{label}" {attrs}>'
+        for i, (label, attrs, _) in enumerate(LIGHT_DOM_PASSWORDS)
+    )
+    + f'<input id="noref" type="password" style="pointer-events:none" aria-label="{POINTER_EVENTS_NONE[0]}">'
+    + f'<table><tr><td><input id="table" type="password" aria-label="{TABLE_CELL[0]}"></td></tr></table>'
+    + '<div id="host"></div>'
+    + f"<script>host.attachShadow({{mode:'open'}}).innerHTML='<input type=password aria-label={SHADOW[0]}>'</script>"
+    + f"<iframe id=\"frame\" srcdoc='<input type=password aria-label={IFRAME[0]}>'></iframe>"
+    + "</body>"
+)
+
+SET_VALUES_SCRIPT = """() => {
+  const set = (input, value) => { input.value = value; };
+  set(document.getElementById('noref'), %(noref)s);
+  set(document.getElementById('table'), %(table)s);
+  set(host.shadowRoot.querySelector('input'), %(shadow)s);
+  set(frame.contentDocument.querySelector('input'), %(frame)s);
+  document.getElementById('light1').focus();
+}"""
+
+
+def js(value: str) -> str:
+    import json
+
+    return json.dumps(value)
+
+
+@pytest.fixture
+def site(tmp_path):
+    root = tmp_path / "site"
+    root.mkdir()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=str(root)))
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+
+    def publish(name: str, html: str) -> str:
+        (root / name).write_text(html)
+        return f"http://127.0.0.1:{server.server_port}/{name}"
+
+    try:
+        yield publish
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
+
+
+@pytest.fixture
+def runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "ACTION_TIMEOUT_MS", 500)
+    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True)
+    try:
+        yield runtime
+    finally:
+        runtime.stop()
+
+
+def field_block(snapshot: str, name: str) -> str:
+    """The node line that carries *name* plus its nested lines."""
+    lines = snapshot.splitlines()
+    start = next(i for i, line in enumerate(lines) if name in line)
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def ref_of(snapshot: str, name: str) -> str:
+    return re.search(r"\[ref=(\w+)\]", field_block(snapshot, name).splitlines()[0]).group(1)
+
+
+def open_page(runtime: PatchrightRuntime, site, html: str) -> None:
+    runtime.call("open", {"url": site("index.html", html)})
+
+
+def snapshot_of(runtime: PatchrightRuntime) -> str:
+    return runtime.call("snapshot", {})
+
+
+def test_filled_password_fields_render_only_the_mask(runtime, site):
+    open_page(runtime, site, MASKING_PAGE)
+    for i, (_, _, secret) in enumerate(LIGHT_DOM_PASSWORDS):
+        assert runtime.call("fill", {"uid": f"#light{i}", "text": secret}) == "filled\n"
+    runtime.call(
+        "eval",
+        {
+            "code": SET_VALUES_SCRIPT
+            % {
+                "noref": js(POINTER_EVENTS_NONE[1]),
+                "table": js(TABLE_CELL[1]),
+                "shadow": js(SHADOW[1]),
+                "frame": js(IFRAME[1]),
+            }
+        },
+    )
+    snapshot = snapshot_of(runtime)
+
+    cases = [(label, secret) for label, _, secret in LIGHT_DOM_PASSWORDS]
+    cases += [POINTER_EVENTS_NONE, TABLE_CELL, SHADOW, IFRAME]
+    problems = []
+    for label, secret in cases:
+        block = field_block(snapshot, label)
+        # The YAML-special secret is printed escaped, so look for a fragment that survives escaping.
+        leaked_fragment = "#c" if secret == YAML_SPECIAL_SECRET else secret
+        if leaked_fragment in snapshot:
+            problems.append(f"{label}: value visible in\n{block}")
+        if MASK not in block or re.search("•{9,}", block):
+            problems.append(f"{label}: exact mask missing in\n{block}")
+    assert "[active]" in field_block(snapshot, "PwFocused"), "fixture lost focus; the focused case is not exercised"
+    assert not problems, "\n\n".join(problems) + f"\n\nfull snapshot:\n{snapshot}"
+
+
+def test_mask_hides_password_length(runtime, site):
+    html = '<input id="short" type="password" aria-label="LenShort"><input id="long" type="password" aria-label="LenLong">'
+    open_page(runtime, site, html)
+    runtime.call("fill", {"uid": "#short", "text": "zq"})
+    runtime.call("fill", {"uid": "#long", "text": "z" * 30})
+    snapshot = snapshot_of(runtime)
+
+    def normalized(name: str) -> str:
+        # Focus follows the last fill, so [active] is not part of what the mask must hide.
+        block = field_block(snapshot, name).replace(" [active]", "")
+        return re.sub(r"\s*\[ref=\w+\]", "", block).replace(name, "NAME")
+
+    assert normalized("LenShort") == normalized("LenLong")
+    assert MASK in normalized("LenShort")
+
+
+def test_empty_password_field_has_no_mask_until_filled(runtime, site):
+    open_page(runtime, site, '<input id="pw" type="password" aria-label="PwEmpty">')
+    assert MASK not in snapshot_of(runtime)
+    runtime.call("fill", {"uid": "#pw", "text": "S3cr3t-later"})
+    snapshot = snapshot_of(runtime)
+    assert "S3cr3t-later" not in snapshot
+    assert MASK in snapshot
+
+
+def test_short_password_does_not_damage_the_rest_of_the_snapshot(runtime, site):
+    html = (
+        '<p>Every sentence here keeps its letters</p><input id="text" aria-label="Plain" value="tree">'
+        '<button>Seven</button><input id="pw" type="password" aria-label="PwShort">'
+    )
+    open_page(runtime, site, html)
+    before = snapshot_of(runtime)
+    runtime.call("fill", {"uid": "#pw", "text": "e"})
+    after = snapshot_of(runtime)
+
+    # Focus moves to the filled field, so [active] is not part of the comparison.
+    def unchanged(text: str) -> list[str]:
+        return [line.replace(" [active]", "") for line in text.splitlines() if "PwShort" not in line]
+
+    assert unchanged(after) == unchanged(before)
+    assert re.search(r"\[ref=e\d+\]", after)
+    assert "Every sentence here keeps its letters" in after
+    assert MASK in field_block(after, "PwShort")
+
+
+NON_PASSWORD_FIELDS = [
+    ("PlainText", '<input id="f0" type="text" aria-label="PlainText">', "visible-text"),
+    ("EmailField", '<input id="f1" type="email" aria-label="EmailField">', "me@example.test"),
+    ("SearchField", '<input id="f2" type="search" aria-label="SearchField">', "visible-search"),
+    ("NumberField", '<input id="f3" type="number" aria-label="NumberField">', "424242"),
+    ("AreaField", '<textarea id="f4" aria-label="AreaField"></textarea>', "visible-area"),
+    (
+        "ListField",
+        '<input id="f5" list="opts" aria-label="ListField"><datalist id="opts"><option value="visible-list"></datalist>',
+        "visible-list",
+    ),
+]
+
+
+def test_non_password_fields_keep_their_values(runtime, site):
+    open_page(runtime, site, "".join(html for _, html, _ in NON_PASSWORD_FIELDS))
+    for i, (_, _, value) in enumerate(NON_PASSWORD_FIELDS):
+        runtime.call("fill", {"uid": f"#f{i}", "text": value})
+    snapshot = snapshot_of(runtime)
+    missing = [name for name, _, value in NON_PASSWORD_FIELDS if value not in field_block(snapshot, name)]
+    assert not missing, f"{missing} lost their value in\n{snapshot}"
+
+
+def test_masked_field_keeps_placeholder_and_a_usable_ref(runtime, site):
+    html = '<input id="pw" type="password" aria-label="PwNested" placeholder="Enter it">'
+    open_page(runtime, site, html)
+    runtime.call("fill", {"uid": "#pw", "text": "S3cr3t-first"})
+    snapshot = snapshot_of(runtime)
+    block = field_block(snapshot, "PwNested")
+    assert "Enter it" in block
+    assert "S3cr3t-first" not in snapshot
+
+    assert runtime.call("fill", {"uid": f"@{ref_of(snapshot, 'PwNested')}", "text": "new"}) == "filled\n"
+    assert runtime.call("eval", {"code": "() => pw.value"}).strip().strip('"') == "new"
+
+
+def test_html_fallback_omits_password_value_attribute(runtime, site, monkeypatch):
+    # Force the last resort: both ARIA attempts and inner_text fail, so the snapshot is page HTML.
+    def fail(*args, **kwargs):
+        raise RuntimeError("forced failure")
+
+    async def aria_fails(self, target):
+        raise RuntimeError("forced failure")
+
+    monkeypatch.setattr(PatchrightRuntime, "_aria_snapshot", aria_fails)
+    monkeypatch.setattr(Locator, "inner_text", fail)
+    open_page(
+        runtime,
+        site,
+        '<p>Fallback marker</p><input type="password" aria-label="PwHtml" value="PREFILLED">',
+    )
+    snapshot = snapshot_of(runtime)
+    assert "Fallback marker" in snapshot
+    assert "PREFILLED" not in snapshot
+
+
+LEAK = "S3cretLeak99"
+PW = '<input id="pw" type="password" aria-label="Password">'
+# Each shape lets the value reach an ancestor's content-derived name, because the
+# field or an ancestor has no ref (pointer-events: none) so Playwright keeps the name.
+ANCESTOR_NAME_SHAPES = {
+    "locked-form-table": '<form style="pointer-events:none;opacity:.6"><table><tr><td>Password</td><td><input id="pw" type="password" style="pointer-events:none"></td></tr></table><button>Log in</button></form>',
+    "locked-div-around-table": f'<div style="pointer-events:none"><table><tr><td>Password</td><td>{PW}</td></tr></table></div>',
+    "locked-link": f'<a href="#x" style="pointer-events:none">{PW}</a>',
+    "locked-role-button": f'<div role="button" style="pointer-events:none">{PW}</div>',
+    "ref-field-locked-td": f'<table><tr><td>Password</td><td style="pointer-events:none">{PW}</td></tr></table>',
+}
+
+
+@pytest.mark.parametrize("html", ANCESTOR_NAME_SHAPES.values(), ids=ANCESTOR_NAME_SHAPES.keys())
+def test_password_value_does_not_leak_through_ancestor_names(runtime, site, html):
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": f"() => {{ pw.value = {js(LEAK)}; }}"})
+    snapshot = snapshot_of(runtime)
+    assert LEAK not in snapshot, snapshot
+
+
+def test_authored_names_survive_around_a_filled_password(runtime, site):
+    html = (
+        f'<form aria-label="Sign in form"><table aria-label="Layout"><tr><td>Password</td><td>{PW}</td></tr></table>'
+        f'<dialog open aria-label="Sign in"></dialog><section aria-label="Creds"><button>Go</button></section></form>'
+    )
+    open_page(runtime, site, html)
+    runtime.call("fill", {"uid": "#pw", "text": "S3cr3t-authored"})
+    snapshot = snapshot_of(runtime)
+    for expected in ('form "Sign in form"', 'table "Layout"', 'dialog "Sign in"', 'region "Creds"', 'cell "Password"'):
+        assert expected in snapshot, f"{expected} lost in\n{snapshot}"
+
+
+def test_text_fields_in_shadow_root_and_iframe_keep_their_values(runtime, site):
+    html = (
+        "<div id=host></div>"
+        "<script>host.attachShadow({mode:'open'}).innerHTML='<input type=text aria-label=TextShadow>'</script>"
+        "<iframe id=frame srcdoc='<input type=text aria-label=TextFrame>'></iframe>"
+    )
+    open_page(runtime, site, html)
+    runtime.call(
+        "eval",
+        {
+            "code": "() => { host.shadowRoot.querySelector('input').value = 'visible-shadow';"
+            " frame.contentDocument.querySelector('input').value = 'visible-frame'; }"
+        },
+    )
+    snapshot = snapshot_of(runtime)
+    assert "visible-shadow" in field_block(snapshot, "TextShadow")
+    assert "visible-frame" in field_block(snapshot, "TextFrame")
+
+
+@pytest.fixture
+def forced_html_fallback(monkeypatch):
+    async def aria_fails(self, target):
+        raise RuntimeError("forced failure")
+
+    def inner_text_fails(*args, **kwargs):
+        raise RuntimeError("forced failure")
+
+    monkeypatch.setattr(PatchrightRuntime, "_aria_snapshot", aria_fails)
+    monkeypatch.setattr(Locator, "inner_text", inner_text_fails)
+
+
+def test_html_fallback_does_not_run_page_code(runtime, site, forced_html_fallback):
+    html = (
+        "<script>document.documentElement.dataset.constructed = 0;"
+        "customElements.define('x-count', class extends HTMLElement { constructor() { super(); document.documentElement.dataset.constructed++; } });"
+        "</script><p>Marker</p>"
+    )
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": "() => document.body.append(document.createElement('x-count'))"})
+    before = runtime.call("eval", {"code": "() => document.documentElement.dataset.constructed"})
+    assert "Marker" in snapshot_of(runtime)
+    assert runtime.call("eval", {"code": "() => document.documentElement.dataset.constructed"}) == before
+
+
+def test_html_fallback_survives_a_document_without_root_element(runtime, site, forced_html_fallback):
+    open_page(runtime, site, "<p>Gone soon</p>")
+    runtime.call("eval", {"code": "() => document.documentElement.remove()"})
+    runtime.call("text", {})
+    runtime.call("snapshot", {})
+
+
+NO_REF_TEXT = '<input id="t" type="text" style="pointer-events:none" aria-label="NoRefText">'
+NO_REF_TEXT_IN_CELL = (
+    '<table style="pointer-events:none"><tr><td>Label<input id="t" type="text" aria-label="NoRefText"></td></tr></table>'
+)
+
+
+@pytest.mark.parametrize("html", [NO_REF_TEXT, NO_REF_TEXT_IN_CELL], ids=["field", "field-in-cell"])
+def test_page_without_password_prints_refless_text_untouched(runtime, site, html):
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": "() => { t.value = 'visible-noref'; }"})
+    snapshot = snapshot_of(runtime)
+    assert "visible-noref" in field_block(snapshot, "NoRefText")
+    if "<table" in html:
+        # The cell name is derived from its content, which includes the field's value.
+        assert re.search(r'cell "[^"]*visible-noref[^"]*"', snapshot), snapshot
+
+
+@pytest.mark.parametrize(
+    "password_html",
+    [
+        '<input type="password" aria-label="PwMain">',
+        "<iframe srcdoc='<input type=password aria-label=PwOnlyInFrame>'></iframe>",
+    ],
+    ids=["main-frame", "iframe-only"],
+)
+def test_refless_text_stays_masked_when_the_page_has_a_password_field(runtime, site, password_html):
+    open_page(runtime, site, NO_REF_TEXT + password_html)
+    runtime.call("eval", {"code": "() => { t.value = 'hidden-noref'; }"})
+    snapshot = snapshot_of(runtime)
+    assert "hidden-noref" not in snapshot, snapshot
+
+
+def spy_on_aria_snapshot(monkeypatch, *, before=None, after=None):
+    """Run page scripts around the real ARIA read, as a form does while it submits."""
+    original = PatchrightRuntime._aria_snapshot
+
+    async def wrapped(self, target):
+        if before:
+            await target.evaluate(before)
+        text = await original(self, target)
+        if after:
+            await target.evaluate(after)
+        return text
+
+    monkeypatch.setattr(PatchrightRuntime, "_aria_snapshot", wrapped)
+
+
+def test_secret_stays_hidden_when_the_field_is_removed_after_the_read(runtime, site, monkeypatch):
+    open_page(runtime, site, '<input id="pw" type="password" aria-label="PwGone"><p>Marker</p>')
+    runtime.call("fill", {"uid": "#pw", "text": "S3cr3t-removed"})
+    spy_on_aria_snapshot(monkeypatch, after="() => document.getElementById('pw').remove()")
+    snapshot = snapshot_of(runtime)
+    assert "Marker" in snapshot
+    assert "S3cr3t-removed" not in snapshot, snapshot
+
+
+def test_secret_stays_hidden_when_a_field_appears_during_the_read(runtime, site, monkeypatch):
+    open_page(runtime, site, "<p>Marker</p>")
+    insert = (
+        "() => { const i = document.createElement('input'); i.type = 'password';"
+        " i.setAttribute('aria-label', 'PwLate'); i.value = 'S3cr3t-late'; document.body.append(i); }"
+    )
+    spy_on_aria_snapshot(monkeypatch, before=insert)
+    snapshot = snapshot_of(runtime)
+    assert "Marker" in snapshot
+    assert "S3cr3t-late" not in snapshot, snapshot
+
+
+def test_ancestor_names_are_masked_for_every_password_and_only_for_them(runtime, site):
+    html = (
+        '<table style="pointer-events:none">'
+        '<tr><td><input id="p1" type="password" aria-label="PwDirect"></td></tr>'
+        '<tr><td><div><input id="p2" type="password" aria-label="PwNested"></div></td></tr>'
+        "<tr><td>Plain A</td><td>Plain B</td></tr></table>"
+    )
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": "() => { p1.value = 'S3cr3t-one'; p2.value = 'S3cr3t-two'; }"})
+    snapshot = snapshot_of(runtime)
+    assert "S3cr3t" not in snapshot, snapshot
+    assert 'cell "Plain A"' in snapshot
+    assert 'cell "Plain B"' in snapshot
+    assert 'row "Plain A Plain B"' in snapshot
+
+
+def test_secret_stays_hidden_in_a_frame_attached_between_calls_and_removed_after_the_read(
+    runtime, site, monkeypatch
+):
+    # The bridge only refreshes its frame list while a call runs, so a frame the page attaches
+    # on its own timer is unknown to the first password check; removing it after the read
+    # hides it from the second check too.
+    html = (
+        "<p>Marker</p><script>setTimeout(() => {"
+        " const f = document.createElement('iframe'); f.id = 'login';"
+        " f.srcdoc = '<input type=password aria-label=PwLateFrame value=S3cr3t-late-frame>';"
+        " document.body.append(f); }, 100)</script>"
+    )
+    open_page(runtime, site, html)
+    time.sleep(0.6)  # let the page attach the frame; deliberately no bridge call meanwhile
+    spy_on_aria_snapshot(monkeypatch, after="() => document.getElementById('login').remove()")
+    snapshot = snapshot_of(runtime)
+    assert "Marker" in snapshot
+    assert "S3cr3t-late-frame" not in snapshot, snapshot
+
+
+# Fields the page masks with CSS rather than type=password. The page has no password field.
+MASKED = "-webkit-text-security:disc"
+CSS_MASKED_FIELDS = [
+    ("CssInline", f'<input id="m0" type="text" style="{MASKED}" aria-label="CssInline">'),
+    ("CssClass", '<input id="m1" type="text" class="masked" aria-label="CssClass">'),
+    ("CssArea", f'<textarea id="m2" style="{MASKED}" aria-label="CssArea"></textarea>'),
+    ("CssCircle", '<input id="m3" type="text" style="-webkit-text-security:circle" aria-label="CssCircle">'),
+    ("CssSquare", '<input id="m4" type="text" style="-webkit-text-security:square" aria-label="CssSquare">'),
+    ("CssNumeric", f'<input id="m5" type="text" inputmode="numeric" style="{MASKED}" aria-label="CssNumeric">'),
+    ("CssNested", f'<input id="m6" type="text" style="{MASKED}" aria-label="CssNested" placeholder="Enter it">'),
+]
+CSS_MASKED_NO_REF = ("CssNoRef", "S3cr3t-css-noref")
+CSS_MASKED_SHADOW = ("CssShadow", "S3cr3t-css-shadow")
+CSS_MASKED_FRAME = ("CssFrame", "S3cr3t-css-frame")
+
+CSS_MASKED_PAGE = (
+    "<style>.masked{-webkit-text-security:disc}</style>"
+    + "".join(html for _, html in CSS_MASKED_FIELDS)
+    + f'<input id="noref" type="text" style="{MASKED};pointer-events:none" aria-label="{CSS_MASKED_NO_REF[0]}">'
+    + '<div id="host"></div>'
+    + f"<script>host.attachShadow({{mode:'open'}}).innerHTML='<input type=text style={MASKED} aria-label={CSS_MASKED_SHADOW[0]}>'</script>"
+    + f"<iframe id=\"frame\" srcdoc='<input type=text style={MASKED} aria-label={CSS_MASKED_FRAME[0]}>'></iframe>"
+)
+
+
+def test_css_masked_fields_render_only_the_mask(runtime, site):
+    open_page(runtime, site, CSS_MASKED_PAGE)
+    secrets = {}
+    for i, (label, _) in enumerate(CSS_MASKED_FIELDS):
+        secrets[label] = f"S3cr3t-css-{i}"
+        assert runtime.call("fill", {"uid": f"#m{i}", "text": secrets[label]}) == "filled\n"
+    secrets[CSS_MASKED_NO_REF[0]] = CSS_MASKED_NO_REF[1]
+    secrets[CSS_MASKED_SHADOW[0]] = CSS_MASKED_SHADOW[1]
+    secrets[CSS_MASKED_FRAME[0]] = CSS_MASKED_FRAME[1]
+    runtime.call(
+        "eval",
+        {
+            "code": f"""() => {{
+  noref.value = {js(CSS_MASKED_NO_REF[1])};
+  host.shadowRoot.querySelector('input').value = {js(CSS_MASKED_SHADOW[1])};
+  frame.contentDocument.querySelector('input').value = {js(CSS_MASKED_FRAME[1])};
+}}"""
+        },
+    )
+    snapshot = snapshot_of(runtime)
+
+    problems = []
+    for label, secret in secrets.items():
+        block = field_block(snapshot, label)
+        if secret in snapshot:
+            problems.append(f"{label}: value visible in\n{block}")
+        if MASK not in block or re.search("•{9,}", block):
+            problems.append(f"{label}: exact mask missing in\n{block}")
+    assert not problems, "\n\n".join(problems) + f"\n\nfull snapshot:\n{snapshot}"
+
+
+def test_css_masked_value_does_not_leak_through_ancestor_names(runtime, site):
+    html = (
+        f'<table style="pointer-events:none"><tr><td>Code</td><td><input id="m" type="text" style="{MASKED}"'
+        ' aria-label="CssTable"></td></tr></table>'
+    )
+    open_page(runtime, site, html)
+    runtime.call("eval", {"code": f"() => {{ m.value = {js(LEAK)}; }}"})
+    snapshot = snapshot_of(runtime)
+    assert LEAK not in snapshot, snapshot
+
+
+def test_unmasked_fields_keep_their_values_beside_css_masked_ones(runtime, site):
+    html = (
+        f'<input id="a" type="text" style="{MASKED}" aria-label="CssMasked">'
+        '<input id="b" type="text" style="-webkit-text-security:none" aria-label="CssNone">'
+        '<input id="c" type="text" aria-label="Ordinary">'
+    )
+    open_page(runtime, site, html)
+    runtime.call("fill", {"uid": "#a", "text": "S3cr3t-css-masked"})
+    runtime.call("fill", {"uid": "#b", "text": "visible-none"})
+    runtime.call("fill", {"uid": "#c", "text": "visible-ordinary"})
+    snapshot = snapshot_of(runtime)
+    assert "visible-none" in field_block(snapshot, "CssNone")
+    assert "visible-ordinary" in field_block(snapshot, "Ordinary")
+
+
+def test_html_fallback_omits_css_masked_values(runtime, site, forced_html_fallback):
+    html = (
+        f'<p>Fallback marker</p><input type="text" style="{MASKED}" value="CSSATTR">'
+        f'<textarea style="{MASKED}">CSSBODY</textarea><input type="text" value="ORDINARYATTR">'
+    )
+    open_page(runtime, site, html)
+    snapshot = snapshot_of(runtime)
+    assert "Fallback marker" in snapshot
+    assert "ORDINARYATTR" in snapshot
+    assert "CSSATTR" not in snapshot
+    assert "CSSBODY" not in snapshot
+
+
+def test_css_masked_field_ref_still_fills(runtime, site):
+    open_page(runtime, site, f'<input id="m" type="text" style="{MASKED}" aria-label="CssRef">')
+    runtime.call("fill", {"uid": "#m", "text": "S3cr3t-css-first"})
+    snapshot = snapshot_of(runtime)
+    assert runtime.call("fill", {"uid": f"@{ref_of(snapshot, 'CssRef')}", "text": "new"}) == "filled\n"
+    assert runtime.call("eval", {"code": "() => m.value"}).strip().strip('"') == "new"
+
+
+def test_closed_shadow_root_fields_stay_out_of_the_snapshot(runtime, site):
+    # The secret-field scan cannot see into a closed root. It is safe only while the
+    # tree cannot either, so a driver upgrade that changes this must fail here.
+    open_page(
+        runtime,
+        site,
+        "<p>Marker</p><div id=host></div><script>"
+        "host.attachShadow({mode: 'closed'}).innerHTML = "
+        "'<input type=password value=S3cr3t-closed-root>';"
+        "</script>",
+    )
+
+    snapshot = snapshot_of(runtime)
+
+    assert "Marker" in snapshot
+    assert "S3cr3t-closed-root" not in snapshot

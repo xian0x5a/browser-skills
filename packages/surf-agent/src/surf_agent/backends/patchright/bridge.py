@@ -17,6 +17,7 @@ from platformdirs import PlatformDirs
 from typing import Any, NoReturn
 from ...constants import DEFAULT_PATCHRIGHT_APP_ID, DEFAULT_WAIT_TIMEOUT_MS, PATCHRIGHT_BACKEND
 from ...errors import ErrorCode
+from ...snapshots import input_value_lines, mask_input_values
 from .constants import CONTEXT_RESTART_REQUIRED
 from .launch_args import STARTUP_PAGE_ARG, capture_default_args, keep_disposable_data_out_of_profile
 from .network_capture import NetworkCapture
@@ -40,6 +41,30 @@ SNAPSHOT_BODY_TIMEOUT_MS = 3_000
 ACTION_TIMEOUT_MS = 5_000
 # Short: probes run after the action already waited ACTION_TIMEOUT_MS.
 ACTIONABILITY_PROBE_TIMEOUT_MS = 250
+# A page hides a field's text with a password input or with this CSS property.
+SECRET_FIELD_TEST = """(field) => field.type === "password" ||
+  !["", "none"].includes(getComputedStyle(field).getPropertyValue("-webkit-text-security"))"""
+FRAME_HAS_SECRET_FIELD_SCRIPT = f"""() => {{
+  const isSecret = {SECRET_FIELD_TEST};
+  const visit = (root) => [...root.querySelectorAll("*")].some((element) =>
+    (element.shadowRoot && visit(element.shadowRoot)) ||
+    (element.matches("input, textarea") && isSecret(element)));
+  return visit(document);
+}}"""
+# A secret can sit in the markup: prefilled, or synced to a value attribute by a framework.
+# Copying into an inert document keeps a read from running custom element constructors.
+HTML_WITHOUT_SECRET_VALUES_SCRIPT = f"""() => {{
+  if (!document.documentElement) return "";
+  const isSecret = {SECRET_FIELD_TEST};
+  const root = document.implementation.createHTMLDocument("").importNode(document.documentElement, true);
+  const copies = root.querySelectorAll("input, textarea");
+  document.querySelectorAll("input, textarea").forEach((field, index) => {{
+    if (!isSecret(field)) return;
+    copies[index].removeAttribute("value");
+    copies[index].textContent = "";
+  }});
+  return root.outerHTML;
+}}"""
 WAIT_POLL_INTERVAL_S = 0.1
 # Returns a description of the element receiving pointer events at the target's
 # center, or null when the target (or its shadow content) receives them itself.
@@ -620,17 +645,20 @@ class PatchrightRuntime:
         try:
             text = await self._maybe_await(page.locator("body").inner_text(timeout=SNAPSHOT_BODY_TIMEOUT_MS))
         except Exception:
-            text = await self._maybe_await(page.content())
+            text = await self._maybe_await(page.evaluate(HTML_WITHOUT_SECRET_VALUES_SCRIPT))
         return text + ("" if text.endswith("\n") else "\n")
 
     async def _snapshot(self, slot: PageSlot) -> str:
         page = slot.page
         parts = ["snapshot:"]
+        secret_before_read = await self._has_secret_field(page)
         try:
-            aria = await self._aria_snapshot(page)
+            aria = await self._mask_secrets(page, await self._aria_snapshot(page), secret_before_read)
         except Exception:
             try:
-                aria = await self._aria_snapshot(page.locator("body"))
+                aria = await self._mask_secrets(
+                    page, await self._aria_snapshot(page.locator("body")), secret_before_read
+                )
             except Exception:
                 aria = (await self._body_text(page)).strip()
         if aria:
@@ -652,6 +680,50 @@ class PatchrightRuntime:
                 return str(await self._maybe_await(target.aria_snapshot(mode="ai", timeout=SNAPSHOT_ARIA_TIMEOUT_MS)))
             except TypeError:
                 return str(await self._maybe_await(target.aria_snapshot(timeout=SNAPSHOT_ARIA_TIMEOUT_MS)))
+
+    async def _has_secret_field(self, page: Any) -> bool:
+        try:
+            return await asyncio.wait_for(self._scan_for_secret_field(page), SNAPSHOT_ARIA_TIMEOUT_MS / 1000)
+        except Exception:
+            return True
+
+    async def _scan_for_secret_field(self, page: Any) -> bool:
+        # The event loop only runs inside a call, so page.frames misses a frame
+        # attached between calls until one round trip delivers the event.
+        await self._maybe_await(page.evaluate("() => 0"))
+        found_in_frames = await asyncio.gather(
+            *(self._maybe_await(frame.evaluate(FRAME_HAS_SECRET_FIELD_SCRIPT)) for frame in page.frames)
+        )
+        return any(found_in_frames)
+
+    async def _mask_secrets(self, page: Any, snapshot_text: str, secret_before_read: bool) -> str:
+        # One scan spares normal fields a round trip each. It looks on both sides of
+        # the read: a submit can remove a field just read, or a form can render during it.
+        if not secret_before_read and not await self._has_secret_field(page):
+            return snapshot_text
+        value_lines = input_value_lines(snapshot_text)
+        may_hold_secret = await asyncio.gather(
+            *(self._may_hold_secret(page, value_line.ref) for value_line in value_lines)
+        )
+        return mask_input_values(
+            snapshot_text,
+            [value_line for value_line, masked in zip(value_lines, may_hold_secret, strict=True) if masked],
+        )
+
+    async def _may_hold_secret(self, page: Any, ref: str | None) -> bool:
+        # Identify the field by element, not by comparing values: a fill can change
+        # the value between two reads, and a stale ref then masks instead of leaking.
+        # Without a ref the element is unreachable (e.g. pointer-events: none).
+        if ref is None:
+            return True
+        try:
+            # All probes share the wait, so a page with thousands of inputs needs the
+            # snapshot's full budget or its text fields would mask at random.
+            return await self._maybe_await(
+                page.locator(f"aria-ref={ref}").evaluate(SECRET_FIELD_TEST, timeout=SNAPSHOT_ARIA_TIMEOUT_MS)
+            )
+        except Exception:
+            return True
 
     async def _fill_or_select(self, locator: Any, text: str) -> None:
         # Playwright's fill rejects <select>; agents reach for fill on dropdowns,

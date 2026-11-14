@@ -12,6 +12,7 @@ from ...chrome_lifecycle import browser_executable_family
 from ..local_bridge import LocalBridgeBackend, LocalBridgeClient, stable_local_page_id
 from ..bridge_common import bridge_health_payload
 from .constants import CONTEXT_RESTART_REQUIRED
+from .last_session import forget_last_session
 from .launch_args import keep_disposable_data_out_of_profile
 
 # Patchright ships with surf-agent; what a fresh host most often lacks is Chrome,
@@ -90,6 +91,7 @@ class PatchrightBackend(LocalBridgeBackend):
                 raise SurfAgentError("could not find Chrome executable for profile open; set SURF_AGENT_CHROME_BIN")
             profile_path = Path(profile_dir)
             profile_path.mkdir(parents=True, exist_ok=True)
+            forget_last_session(profile_path)
             command = [
                 *shlex.split(self.agent.chrome_bin),
                 *keep_disposable_data_out_of_profile(

@@ -169,7 +169,7 @@ Fields `profile_dir`, `bridge_port`, `app_id`.
 
 ### `browser.open_profile(url='about:blank') -> None`
 
-Opens the dedicated profile for manual setup without automation/debugging.
+Opens the dedicated profile for manual setup without automation/debugging. Tabs from the previous launch are not restored.
 
 ### `browser.cookie_source() -> CookieSourceConfig | None`
 

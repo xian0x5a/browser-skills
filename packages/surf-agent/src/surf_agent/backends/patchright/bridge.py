@@ -20,6 +20,7 @@ from ...errors import ErrorCode
 from ...snapshots import input_value_lines, mask_input_values
 from .constants import CONTEXT_RESTART_REQUIRED
 from .launch_args import STARTUP_PAGE_ARG, capture_default_args, keep_disposable_data_out_of_profile
+from .last_session import forget_last_session
 from .network_capture import NetworkCapture
 from .saved_zoom import clear_saved_zoom
 from ..bridge_common import (
@@ -171,6 +172,7 @@ class PatchrightRuntime:
             return
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         clear_saved_zoom(self.profile_dir)
+        forget_last_session(self.profile_dir)
         # One identity for both flags: window rules match it as the Wayland app-id or X11 WM_CLASS.
         launch_args = [f"--class={self.app_id}", f"--name={self.app_id}"]
         self.manager = async_playwright()

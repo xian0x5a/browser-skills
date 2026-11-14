@@ -507,7 +507,6 @@ class PatchrightRuntime:
             # Browser-level: a page-level session needs an open page, and opening one
             # while Chrome has no window shows it in the foreground.
             session = await self._maybe_await(context.browser.new_browser_cdp_session())
-            await self._close_unmanaged_tabs(session, keep_target_ids=managed_target_ids)
             # Background: a foreground window activates Chrome and steals focus from the
             # user's app (measured on macOS). Thread.focus() raises a window on request.
             response = await self._maybe_await(
@@ -521,9 +520,11 @@ class PatchrightRuntime:
             except Exception:
                 await self._best_effort_close_target(session, target_id)
                 raise
-            # A Chrome left running with no window (a human closed every Surf window)
-            # restores the last session's tabs into the next window it opens; they are
-            # already there once the new page appears (measured).
+            # Sweep only once the new window exists: closing the last stray window first
+            # would leave Chrome windowless, and Chrome restores the last session's tabs
+            # into the next window it opens after having none (as when a human closes
+            # every Surf window). The restored tabs were present when open() returned in
+            # every live run; one restored later stays until the next window's sweep.
             await self._close_unmanaged_tabs(session, keep_target_ids={*managed_target_ids, target_id})
             return page
         finally:

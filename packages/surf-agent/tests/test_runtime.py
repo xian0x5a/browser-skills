@@ -259,9 +259,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(stops), 1)
         self.assertTrue(runtime.restart_requested)
         self.assertNotIn("thread", runtime.pages)
-        # Whichever CDP call reaches the closed browser first, no window gets created.
-        self.assertTrue(closed_context.cdp_calls)
-        self.assertNotIn("Target.createTarget", [method for method, _ in closed_context.cdp_calls])
+        self.assertEqual(
+            closed_context.cdp_calls,
+            [
+                (
+                    "Target.createTarget",
+                    {
+                        "url": "about:blank",
+                        "newWindow": True,
+                        "background": True,
+                    },
+                )
+            ],
+        )
 
     def test_patchright_open_recreates_closed_target_without_double_navigation(self):
         class DeadPage:

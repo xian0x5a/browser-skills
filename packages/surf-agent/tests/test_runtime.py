@@ -54,6 +54,24 @@ def snapshot_capture(text=None, **overrides):
     )
 
 
+def answer_target_sweep(context, method, params):
+    """Answer the browser-level CDP calls of the unmanaged-tab sweep from context.pages."""
+    if method == "Target.getTargets":
+        return {
+            "targetInfos": [
+                {"targetId": page.target_id, "type": "page"}
+                for page in context.pages
+                if not page.is_closed()
+            ]
+        }
+    if method == "Target.closeTarget":
+        for page in context.pages:
+            if page.target_id == params["targetId"]:
+                page.close()
+        return {"success": True}
+    return None
+
+
 class RuntimeTests(unittest.TestCase):
     def test_surf_agent_home_overrides_all_default_roots(self):
         with (
@@ -152,6 +170,9 @@ class RuntimeTests(unittest.TestCase):
                     return {"targetInfo": {"targetId": self.page.target_id}}
                 if method == "Page.resetNavigationHistory":
                     return {}
+                swept = answer_target_sweep(self.context, method, params)
+                if swept is not None:
+                    return swept
                 self.context.cdp_calls.append((method, params))
                 self.context.pages.append(FakePage(params["url"], target_id="target-1"))
                 return {"targetId": "target-1"}
@@ -238,23 +259,14 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(stops), 1)
         self.assertTrue(runtime.restart_requested)
         self.assertNotIn("thread", runtime.pages)
-        self.assertEqual(
-            closed_context.cdp_calls,
-            [
-                (
-                    "Target.createTarget",
-                    {
-                        "url": "about:blank",
-                        "newWindow": True,
-                        "background": True,
-                    },
-                )
-            ],
-        )
+        # Whichever CDP call reaches the closed browser first, no window gets created.
+        self.assertTrue(closed_context.cdp_calls)
+        self.assertNotIn("Target.createTarget", [method for method, _ in closed_context.cdp_calls])
 
     def test_patchright_open_recreates_closed_target_without_double_navigation(self):
         class DeadPage:
             url = "about:blank"
+            target_id = "dead-target"
 
             def __init__(self):
                 self.closed = False
@@ -296,6 +308,9 @@ class RuntimeTests(unittest.TestCase):
                     return {"targetInfo": {"targetId": self.page.target_id}}
                 if method == "Page.resetNavigationHistory":
                     return {}
+                swept = answer_target_sweep(self.context, method, params)
+                if swept is not None:
+                    return swept
                 self.context.cdp_calls.append((method, params))
                 page = CreatedPage(params["url"], target_id="target-1")
                 self.context.pages.append(page)
@@ -345,6 +360,85 @@ class RuntimeTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_patchright_new_window_closes_tab_chrome_restored_outside_context_pages(self):
+        # Chrome restores the last session's tabs into the first window it opens after
+        # having none; Patchright never lists them in context.pages.
+        class FakePage:
+            def __init__(self, url, target_id):
+                self.url = url
+                self.target_id = target_id
+                self.closed = False
+
+            def is_closed(self):
+                return self.closed
+
+            def close(self):
+                self.closed = True
+
+            def goto(self, url, wait_until=None):
+                self.url = url
+
+        class FakeSession:
+            def __init__(self, context, page):
+                self.context = context
+                self.page = page
+
+            def send(self, method, params=None):
+                if method == "Target.getTargetInfo":
+                    return {"targetInfo": {"targetId": self.page.target_id}}
+                if method == "Page.resetNavigationHistory":
+                    return {}
+                if method == "Target.getTargets":
+                    return {"targetInfos": [dict(info) for info in self.context.targets.values()]}
+                if method == "Target.closeTarget":
+                    del self.context.targets[params["targetId"]]
+                    self.context.closed_target_ids.append(params["targetId"])
+                    return {"success": True}
+                self.context.pages.append(FakePage(params["url"], target_id="new-target"))
+                self.context.targets["new-target"] = {"targetId": "new-target", "type": "page"}
+                # The restored tab shows up together with the new window, unlisted by Patchright.
+                self.context.targets["restored-tab"] = {"targetId": "restored-tab", "type": "page"}
+                return {"targetId": "new-target"}
+
+            def detach(self):
+                pass
+
+        class FakeContext:
+            def __init__(self):
+                managed = FakePage("https://managed.test/", "managed-target")
+                self.pages = [managed]
+                self.targets = {
+                    "managed-target": {"targetId": "managed-target", "type": "page"},
+                    "browser-ui": {"targetId": "browser-ui", "type": "browser_ui"},
+                    "prerender": {"targetId": "prerender", "type": "page", "subtype": "prerender"},
+                }
+                self.closed_target_ids = []
+                self.browser = types.SimpleNamespace(
+                    new_browser_cdp_session=lambda: FakeSession(self, None)
+                )
+
+            def new_page(self):
+                raise AssertionError("a new page would open a foreground window")
+
+            def new_cdp_session(self, page):
+                return FakeSession(self, page)
+
+        context = FakeContext()
+        managed = context.pages[0]
+        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime.browser_or_context = context
+        runtime.pages["managed"] = patchright_bridge.PageSlot(page=managed, page_id=1)
+
+        slot = runtime._run(runtime._new_page("thread", url="https://welcome.test/"))
+
+        self.assertEqual(context.closed_target_ids, ["restored-tab"])
+        self.assertEqual(
+            set(context.targets), {"managed-target", "new-target", "browser-ui", "prerender"}
+        )
+        self.assertFalse(managed.closed)
+        self.assertFalse(slot.page.closed)
+        self.assertEqual(slot.page.url, "https://welcome.test/")
 
     def test_patchright_runtime_open_snapshot_click_and_text(self):
         class FakeElement:
@@ -473,6 +567,9 @@ class RuntimeTests(unittest.TestCase):
                     return {}
                 if method == "Page.getLayoutMetrics":
                     return {"cssVisualViewport": {"zoom": 1}}
+                swept = answer_target_sweep(self.context, method, params)
+                if swept is not None:
+                    return swept
                 self.context.cdp_calls.append((method, params))
                 page = FakePage(params["url"], target_id="target-1")
                 self.context.pages.append(page)

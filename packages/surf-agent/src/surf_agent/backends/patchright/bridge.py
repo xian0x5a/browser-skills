@@ -91,6 +91,8 @@ NO_STARTUP_WINDOW_ARG = "--no-startup-window"
 BLANK_PAGE_URL = "about:blank"
 # Chrome's Page.resetNavigationHistory error while a back/forward navigation is pending.
 HISTORY_NAVIGATION_PENDING_MESSAGE = "History cannot be pruned"
+# CDP's answer to Target.closeTarget for a target that no longer exists.
+MISSING_TARGET_MESSAGE = "No target with given id found"
 # The windowless launch relies on Patchright skipping its first-page wait; if a
 # Patchright release stops skipping it, fail after this instead of hanging.
 LAUNCH_TIMEOUT_MS = 30_000
@@ -498,13 +500,14 @@ class PatchrightRuntime:
     async def _create_new_window_page(self) -> Any:
         context = self._context()
         excluded_page_ids = {id(page) for page in self._open_managed_pages()}
+        managed_target_ids = await self._managed_target_ids(context)
         session = None
         target_id: str | None = None
         try:
-            await self._close_unmanaged_pages(context)
             # Browser-level: a page-level session needs an open page, and opening one
             # while Chrome has no window shows it in the foreground.
             session = await self._maybe_await(context.browser.new_browser_cdp_session())
+            await self._close_unmanaged_tabs(session, keep_target_ids=managed_target_ids)
             # Background: a foreground window activates Chrome and steals focus from the
             # user's app (measured on macOS). Thread.focus() raises a window on request.
             response = await self._maybe_await(
@@ -514,26 +517,39 @@ class PatchrightRuntime:
             if not isinstance(target_id, str) or not target_id:
                 raise RuntimeError("Patchright CDP Target.createTarget returned no valid target")
             try:
-                return await self._wait_for_created_target_page(context, excluded_page_ids, target_id)
+                page = await self._wait_for_created_target_page(context, excluded_page_ids, target_id)
             except Exception:
                 await self._best_effort_close_target(session, target_id)
                 raise
+            # A Chrome left running with no window (a human closed every Surf window)
+            # restores the last session's tabs into the next window it opens; they are
+            # already there once the new page appears (measured).
+            await self._close_unmanaged_tabs(session, keep_target_ids={*managed_target_ids, target_id})
+            return page
         finally:
             await self._best_effort_detach(session)
 
     def _open_managed_pages(self) -> list[Any]:
         return [slot.page for slot in self.pages.values() if self._page_is_open(slot.page)]
 
-    async def _close_unmanaged_pages(self, context: Any, *, keep_ids: set[int] | None = None) -> None:
-        keep_ids = keep_ids or set()
-        managed_ids = {id(page) for page in self._open_managed_pages()}
-        for page in list(context.pages):
-            if id(page) in keep_ids or id(page) in managed_ids or not self._page_is_open(page):
+    async def _managed_target_ids(self, context: Any) -> set[str]:
+        target_ids = {await self._page_target_id(context, page) for page in self._open_managed_pages()}
+        return {target_id for target_id in target_ids if target_id is not None}
+
+    async def _close_unmanaged_tabs(self, session: Any, *, keep_target_ids: set[str]) -> None:
+        # Read tabs from CDP rather than context.pages: Patchright never lists tabs that
+        # Chrome restored from the last session, so they would stay open for good.
+        # Chrome's own UI is type "browser_ui", and a subtype marks a page that is not a
+        # tab, such as a prerender.
+        response = await self._maybe_await(session.send("Target.getTargets"))
+        for target in response["targetInfos"]:
+            if target["type"] != "page" or target.get("subtype") or target["targetId"] in keep_target_ids:
                 continue
             try:
-                await self._maybe_await(page.close())
+                await self._maybe_await(session.send("Target.closeTarget", {"targetId": target["targetId"]}))
             except Exception as exc:
-                if not self._is_closed_target_error(exc):
+                # The tab can close on its own between listing and closing.
+                if MISSING_TARGET_MESSAGE not in str(exc):
                     raise
 
     async def _wait_for_created_target_page(

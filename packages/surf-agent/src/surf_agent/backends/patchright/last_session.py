@@ -14,8 +14,11 @@ from pathlib import Path
 
 from ...constants import CHROME_PROFILE_DIRECTORY
 
-# Chrome stores the session as Sessions/Session_<timestamp> and recently closed tabs
-# as Sessions/Tabs_<timestamp>; only the former is restored at startup.
+# Chrome stores the session as Session_<timestamp> and recently closed tabs as
+# Tabs_<timestamp>; only the former is restored at startup. It writes both a cleartext
+# and an encrypted copy, and which copy it restores from is a field-trial setting that
+# can change without a Chrome update, so both copies are removed.
+SESSION_DIRECTORIES = ("Sessions", "Sessions_Encrypted")
 LAST_SESSION_GLOB = "Session_*"
 
 
@@ -25,5 +28,7 @@ def forget_last_session(profile_dir: Path) -> None:
     Call only while Chrome is not running on the profile: a running Chrome keeps
     writing its current session.
     """
-    for session_file in (profile_dir / CHROME_PROFILE_DIRECTORY / "Sessions").glob(LAST_SESSION_GLOB):
-        session_file.unlink()
+    chrome_profile = profile_dir / CHROME_PROFILE_DIRECTORY
+    for directory in SESSION_DIRECTORIES:
+        for session_file in (chrome_profile / directory).glob(LAST_SESSION_GLOB):
+            session_file.unlink()

@@ -89,6 +89,8 @@ PATCHRIGHT_INCOMPATIBLE_DEFAULT_ARGS = ("--password-store=basic", "--use-mock-ke
 # focus. Thread windows are created later, in the background.
 NO_STARTUP_WINDOW_ARG = "--no-startup-window"
 BLANK_PAGE_URL = "about:blank"
+# Read-only snapshots and commands that lock the threads they touch themselves.
+COMMANDS_WITHOUT_THREAD_LOCK = frozenset({"list", "state", "close-matching", "rename-thread"})
 # Chrome's Page.resetNavigationHistory error while a back/forward navigation is pending.
 HISTORY_NAVIGATION_PENDING_MESSAGE = "History cannot be pruned"
 # CDP's answer to Target.closeTarget for a target that no longer exists.
@@ -122,6 +124,16 @@ class PatchrightRuntime:
         self.shutdown_requested = False
         self._close_shutdown_pending = False
         self.restart_requested = False
+        # Calls from different Surf threads interleave at every await on one event loop.
+        # A thread's lock keeps its own calls in order; the browser lock covers launch and
+        # window creation through registration, so one creation's unmanaged-tab sweep never
+        # sees another thread's unregistered window.
+        self._thread_locks: dict[str, asyncio.Lock] = {}
+        self._browser_lock = asyncio.Lock()
+        self._calls_in_flight = 0
+        # One-way: once stop or restart begins, this process never relaunches the browser;
+        # the client relaunches through its cross-process launch guard (cookie preflight).
+        self._stopping = False
 
     def health_payload(self) -> dict[str, object]:
         return bridge_health_payload(PATCHRIGHT_BACKEND, self.profile_dir)
@@ -130,22 +142,48 @@ class PatchrightRuntime:
         self._run(self._start_async())
 
     def stop(self) -> str:
+        self._stopping = True
         result = self._run(self._stop_async())
         self._close_runner()
         return result
 
     def call(self, name: str, args: dict[str, Any]) -> str:
+        result = self._run(self.call_async(name, args))
+        if name == "stop":
+            self._close_runner()
+        return result
+
+    async def call_async(self, name: str, args: dict[str, Any]) -> str:
+        if name == "stop":
+            return await self._stop_once()
+        self._raise_if_stopping()
+        self._calls_in_flight += 1
         try:
-            result = self._run(self._call_async(name, args))
+            if name in COMMANDS_WITHOUT_THREAD_LOCK:
+                return await self._call_async(name, args)
+            async with self._thread_lock(str(args.get("thread") or "default")):
+                return await self._call_async(name, args)
         except BridgeCodedError:
             raise
         except Exception as exc:
             if self._is_closed_target_error(exc):
                 raise BridgeCodedError(ErrorCode.PAGE_CLOSED, str(exc)) from exc
             raise
-        if name == "stop":
-            self._close_runner()
-        return result
+        finally:
+            self._calls_in_flight -= 1
+
+    def _thread_lock(self, thread: str) -> asyncio.Lock:
+        return self._thread_locks.setdefault(thread, asyncio.Lock())
+
+    def _raise_if_stopping(self) -> None:
+        if self._stopping:
+            raise RuntimeError(CONTEXT_RESTART_REQUIRED)
+
+    async def _stop_once(self) -> str:
+        if self._stopping:
+            return "stopped\n"
+        self._stopping = True
+        return await self._stop_async()
 
     def _run(self, awaitable: Any) -> Any:
         if self._runner is None:
@@ -172,6 +210,13 @@ class PatchrightRuntime:
     async def _start_async(self) -> None:
         if self.browser_or_context is not None:
             return
+        async with self._browser_lock:
+            # A call that passed the entry check may arrive here after stop began.
+            self._raise_if_stopping()
+            if self.browser_or_context is None:
+                await self._launch_async()
+
+    async def _launch_async(self) -> None:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         clear_saved_zoom(self.profile_dir)
         forget_last_session(self.profile_dir)
@@ -230,8 +275,6 @@ class PatchrightRuntime:
         return "stopped\n"
 
     async def _call_async(self, name: str, args: dict[str, Any]) -> str:
-        if name == "stop":
-            return await self._stop_async()
         thread = str(args.get("thread") or "default")
         if name == "state":
             slot = self.pages.get(thread)
@@ -249,11 +292,15 @@ class PatchrightRuntime:
                 if thread not in self.pages:
                     raise RuntimeError(f"thread not found: {thread}")
                 return f"renamed {destination_thread}\n"
-            if thread not in self.pages:
-                raise RuntimeError(f"thread not found: {thread}")
-            if destination_thread in self.pages:
-                raise RuntimeError(f"thread already exists: {destination_thread}")
-            self.pages[destination_thread] = self.pages.pop(thread)
+            # Lock both names (sorted, so two renames cannot deadlock): an unlocked rename
+            # onto a thread mid-creation would be overwritten when that window registers.
+            first, second = sorted((thread, destination_thread))
+            async with self._thread_lock(first), self._thread_lock(second):
+                if thread not in self.pages:
+                    raise RuntimeError(f"thread not found: {thread}")
+                if destination_thread in self.pages:
+                    raise RuntimeError(f"thread already exists: {destination_thread}")
+                self.pages[destination_thread] = self.pages.pop(thread)
             return f"renamed {destination_thread}\n"
         if name == "close":
             old = self.pages.pop(thread, None)
@@ -267,17 +314,22 @@ class PatchrightRuntime:
             if not pattern:
                 raise RuntimeError("close-matching requires a thread glob pattern")
             result: dict[str, Any] = {"pattern": pattern, "closed": [], "failed": []}
-            for managed_thread, slot in sorted(self.pages.items()):
+            for managed_thread in sorted(self.pages):
                 if not fnmatch.fnmatchcase(managed_thread, pattern):
                     continue
-                item = {"thread": managed_thread, "page_id": slot.page_id}
-                try:
-                    await self._maybe_await(slot.page.close())
-                except Exception:
-                    result["failed"].append(item)
-                else:
-                    self.pages.pop(managed_thread, None)
-                    result["closed"].append(item)
+                # Wait out the thread's in-flight call so its page is not closed mid-action.
+                async with self._thread_lock(managed_thread):
+                    slot = self.pages.get(managed_thread)
+                    if slot is None:
+                        continue
+                    item = {"thread": managed_thread, "page_id": slot.page_id}
+                    try:
+                        await self._maybe_await(slot.page.close())
+                    except Exception:
+                        result["failed"].append(item)
+                    else:
+                        self.pages.pop(managed_thread, None)
+                        result["closed"].append(item)
             # The HTTP handler arms this only after its success response is written.
             if not result["failed"]:
                 self._close_shutdown_pending = True
@@ -418,23 +470,28 @@ class PatchrightRuntime:
         if name not in {"close", "close-matching"} or not self._close_shutdown_pending:
             return
         self._close_shutdown_pending = False
-        if self._visible_pages():
+        if self._is_busy():
             return
         self.shutdown_requested = True
 
     def service_actions(self) -> bool:
         if not self.shutdown_requested:
             return False
-        if self._visible_pages():
+        if self._is_busy():
             self._cancel_shutdown_request()
             return False
         try:
             self.stop()
         except Exception as exc:
             # The close request already succeeded; preserve the runtime on stop failure.
+            self._stopping = False
             print(f"surf-agent: warning: could not stop idle Patchright bridge: {exc}", file=sys.stderr)
             return False
         return True
+
+    def _is_busy(self) -> bool:
+        # An in-flight call may be creating a window that is not visible yet.
+        return bool(self._calls_in_flight or self._visible_pages())
 
     def _visible_pages(self) -> list[Any]:
         if self.browser_or_context is None or not hasattr(self.browser_or_context, "pages"):
@@ -464,17 +521,21 @@ class PatchrightRuntime:
         old = self.pages.pop(thread, None)
         if old and self._page_is_open(old.page):
             await self._maybe_await(old.page.close())
-        try:
-            page = await self._create_new_window_page()
-        except Exception as exc:
-            if not self._is_closed_target_error(exc):
-                raise
-            # Manual window close can close the whole persistent context; the client
-            # relaunches it in a fresh bridge process and retries the request.
-            await self._restart_closed_context()
-        slot = PageSlot(page=page, page_id=self._next_page_id)
-        self._next_page_id += 1
-        self.pages[thread] = slot
+        async with self._browser_lock:
+            self._raise_if_stopping()
+            try:
+                page = await self._create_new_window_page()
+            except Exception as exc:
+                if not self._is_closed_target_error(exc):
+                    raise
+                # Manual window close can close the whole persistent context; the client
+                # relaunches it in a fresh bridge process and retries the request.
+                await self._restart_closed_context()
+            # Register before releasing the lock: the next creation's sweep keeps only
+            # registered windows.
+            slot = PageSlot(page=page, page_id=self._next_page_id)
+            self._next_page_id += 1
+            self.pages[thread] = slot
         if url and url != BLANK_PAGE_URL:
             # Navigate here rather than handing the URL to Target.createTarget: the target
             # appears before that navigation commits, so the page came back without its URL
@@ -640,13 +701,16 @@ class PatchrightRuntime:
         # Stop and request a fresh bridge process so LocalBridgeClient.before_start
         # performs the cookie preflight before the next persistent-context launch.
         self._cancel_shutdown_request()
-        try:
-            await self._stop_async()
-        except Exception:
-            self.manager = None
-            self.browser_or_context = None
-            self.pages.clear()
-        self.restart_requested = True
+        # Several in-flight calls can hit the closed context; only the first one stops it.
+        if not self._stopping:
+            self._stopping = True
+            try:
+                await self._stop_async()
+            except Exception:
+                self.manager = None
+                self.browser_or_context = None
+                self.pages.clear()
+            self.restart_requested = True
         raise RuntimeError(CONTEXT_RESTART_REQUIRED)
 
     def _page_is_open(self, page: Any) -> bool:

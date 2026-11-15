@@ -1,5 +1,5 @@
 ---
-status: open
+status: done
 ---
 
 ## Goal
@@ -39,19 +39,26 @@ Layer 1, runtime made safe for interleaved calls (server unchanged):
   Stop and restart run once.
 
 Layer 2, server swap: uvicorn + Starlette serve `GET /health` and `POST /call` on the runtime's loop.
-Idle shutdown and restart set `server.should_exit`; lifespan shutdown stops the browser before
-uvicorn drains requests, with a graceful-shutdown timeout so a wedged call cannot block exit.
-A call whose client disconnects is cancelled, so its thread lock is released.
+After each response, `finish_response` decides whether the process exits (explicit stop, idle stop,
+closed-context restart) and returns only once the shared stop task has finished; the server then
+sets `server.should_exit`. A graceful-shutdown timeout cancels a wedged call so exit cannot hang.
+A call runs to completion even if its client disconnects (see Decisions).
 
 ## Decisions
 
 - uvicorn + Starlette over a threaded stdlib front end with a loop thread (weighted 3.95 vs 3.65,
-  advisor review): one loop in one thread by construction, standard shutdown, cancel-on-disconnect.
+  advisor review): one loop in one thread by construction, standard graceful shutdown.
   FastAPI rejected: its validation and OpenAPI layers add Pydantic for two internal endpoints.
 - Readers-writer lock rejected (advisor): asyncio has none in the stdlib, and an exclusive stop
   queued behind a long or wedged call would freeze every new call. Stop/restart are terminal, so
   a one-way `stopping` state covers them.
 - Hand-written asyncio HTTP rejected: reimplements HTTP parsing.
+- Cancel-on-disconnect rejected after review (weighted 2.7 vs 4.1 for dropping it): cancelling an
+  abandoned call mid-launch, mid-window-creation or mid-stop stranded half-made state (a second
+  driver, an unregistered window that blocked idle stop, an exit request skipped). Every
+  browser-wide operation would have to stay cancellation-safe forever, while the gain is small:
+  bounded calls end on their own timeouts, and a frozen renderer hangs the next call on that page
+  anyway. A wedged call blocks only its own thread; `stop_bridge()` recovers it.
 
 ## Validation
 
@@ -66,20 +73,33 @@ Layer 1 (runtime level, gated async fakes):
 
 Layer 2 (HTTP level):
 6. Health answers while a call is in flight.
-7. A client disconnect mid-call releases the thread for the next call.
-8. Stop during an in-flight call returns promptly and the process exits.
+7. A call abandoned mid-window-creation still registers its window; closing every thread then
+   idle-stops the bridge.
+8. Stop during an in-flight call returns promptly and the process exits; while a stop is still
+   running, concurrent calls get `CONTEXT_RESTART_REQUIRED` and the process does not exit early.
 
 Live: scratchpad repro with two clients on an isolated `SURF_AGENT_HOME` and port, headless where
 possible; never live Google.
 
 ## Progress
 
-- [ ] Layer 1 tests red.
-- [ ] Layer 1 implemented; full suite green.
-- [ ] Layer 2 tests red.
-- [ ] Layer 2 implemented; full suite and live repro green.
-- [ ] Independent review; runtime pin; docs.
+- [x] Layer 1 tests red (5 of 6; the overlap case passes on the old runtime and guards over-locking).
+- [x] Layer 1 implemented; full suite green (8e2c985).
+- [x] Layer 2 implemented (766ee98); HTTP-level tests written after it, by an independent agent.
+- [x] Live repro: B's call returned in 0.08 s while A's 4 s call ran (2/2); bridge exited after final close.
+- [x] Review findings fixed (cancel-on-disconnect dropped; exit waits for stop) in 625fff1;
+  re-review found no defects.
+- [x] Runtime pinned at 625fff1; ADR 0010; backend doc updated.
 
 ## Surprises & Discoveries
 
+- `test_screenshot_of_frozen_page_times_out_and_leaves_the_bridge_usable` (live) already fails on
+  main: opening another thread after a frozen screenshot hangs. Unchanged by this work.
+
 ## Outcomes & Retrospective
+
+Calls on different Surf threads now overlap: live, a second agent's `open` returned in 0.08 s while
+another agent's 4 s call ran, where it previously waited it out. The lasting decisions are in
+`docs/adr/0010-serve-the-bridge-concurrently.md`. Lesson: the advisor's cancel-on-disconnect idea
+looked like robustness but made every browser-wide operation responsible for cancellation safety;
+the review caught it before shipping. Untested branch: exiting when the stop itself fails.

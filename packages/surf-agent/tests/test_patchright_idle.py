@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 
 
@@ -64,13 +65,13 @@ def test_patchright_launch_is_windowless_with_patchrights_own_flags(monkeypatch,
 
     monkeypatch.setattr(bridge, "async_playwright", Manager)
     monkeypatch.setattr(bridge, "capture_default_args", capture)
-    runtime = PatchrightRuntime(
+    runtime = SyncRuntime(PatchrightRuntime(
         profile_dir=tmp_path / "chrome",
         disk_cache_dir=tmp_path / "cache",
         app_id="surf-agent",
-    )
+    ))
     try:
-        runtime.start()
+        runtime._run(runtime._start_async())
     finally:
         runtime.stop()
 
@@ -104,7 +105,7 @@ def test_patchright_launch_is_windowless_with_patchrights_own_flags(monkeypatch,
 def test_patchright_requests_shutdown_only_after_final_close_response() -> None:
     page = Page()
     context = Context([page])
-    runtime = PatchrightRuntime(profile_dir=Path("/tmp/patchright-idle"))
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/patchright-idle")))
     runtime.browser_or_context = context
     runtime.pages["thread"] = __import__("surf_agent.backends.bridge_common", fromlist=["PageSlot"]).PageSlot(page=page, page_id=1)
 
@@ -112,14 +113,14 @@ def test_patchright_requests_shutdown_only_after_final_close_response() -> None:
     assert runtime.shutdown_requested is False
     runtime.after_response("close")
     assert runtime.shutdown_requested is True
-    assert runtime.service_actions() is True
+    assert runtime.finish_response("close") is True
     assert runtime.browser_or_context is None
 
 
 def test_patchright_final_close_keeps_bridge_when_visible_page_remains() -> None:
     page = Page()
     context = Context([page])
-    runtime = PatchrightRuntime(profile_dir=Path("/tmp/patchright-idle"))
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/patchright-idle")))
     runtime.browser_or_context = context
     runtime.pages["thread"] = __import__("surf_agent.backends.bridge_common", fromlist=["PageSlot"]).PageSlot(page=page, page_id=1)
 
@@ -128,14 +129,14 @@ def test_patchright_final_close_keeps_bridge_when_visible_page_remains() -> None
     runtime.after_response("close")
 
     assert runtime.shutdown_requested is False
-    assert runtime.service_actions() is False
+    assert runtime.finish_response("close") is False
     assert context.closed is False
 
 
 def test_closed_context_recovery_requests_fresh_bridge_restart_without_direct_relaunch() -> None:
     from surf_agent.backends.patchright.bridge import CONTEXT_RESTART_REQUIRED
 
-    runtime = PatchrightRuntime(profile_dir=Path("/tmp/patchright-recovery"))
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/patchright-recovery")))
     events: list[str] = []
 
     async def stop() -> str:
@@ -153,4 +154,4 @@ def test_closed_context_recovery_requests_fresh_bridge_restart_without_direct_re
         runtime._run(runtime._restart_closed_context())
 
     assert events == ["stopped"]
-    assert runtime.restart_requested is True
+    assert runtime.finish_response("open") is True

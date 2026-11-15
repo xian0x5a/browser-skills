@@ -184,9 +184,10 @@ class NetworkCapture:
             capture.account_body(entry.size)
 
     async def _settle(self, page: Any) -> None:
-        # The bridge loop is idle between calls, so response events queue in the
-        # driver pipe. The pipe is FIFO: one round-trip dispatches every queued
-        # event (spawning its body read) before the reply resolves.
+        # Response events may still be queued in the driver pipe. The pipe is FIFO:
+        # one round-trip dispatches every queued event (spawning its body read)
+        # before the reply resolves. Pending reads span all pages, so another
+        # thread's slow body can add up to BODY_SETTLE_TIMEOUT_S of latency here.
         await page.title()
         if self._pending:
             await asyncio.wait(self._pending, timeout=BODY_SETTLE_TIMEOUT_S)

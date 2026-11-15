@@ -13,6 +13,7 @@ import pytest
 from surf_agent.backends.bridge_common import PageSlot
 from surf_agent.backends.local_bridge import LocalBridgeClient
 from surf_agent.backends.patchright.backend import PatchrightBackend, PatchrightBridgeClient
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 from surf_agent.runtime import SurfAgent
 from surf_agent import Browser
@@ -80,7 +81,7 @@ def health_response(payload: dict[str, object]) -> MagicMock:
 
 
 def runtime_with_pages(tmp_path: Path, pages: dict[str, tuple[Page, int]]) -> PatchrightRuntime:
-    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile")
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile"))
     runtime.pages = {
         thread: PageSlot(page=page, page_id=page_id)
         for thread, (page, page_id) in pages.items()
@@ -207,7 +208,7 @@ def test_patchright_health_proves_the_configured_profile_identity(
         port=9555,
         profile_dir=profile_dir,
     )
-    runtime = PatchrightRuntime(profile_dir=profile_dir)
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=profile_dir))
 
     with patch(
         "surf_agent.backends.local_bridge.urllib.request.urlopen",
@@ -311,7 +312,7 @@ def test_close_all_requests_shutdown_after_response(tmp_path: Path) -> None:
 
     runtime.after_response("close-matching")
     assert runtime.shutdown_requested is True
-    assert runtime.service_actions() is True
+    assert runtime.finish_response("close-matching") is True
     assert runtime.browser_or_context is None
 
 
@@ -326,7 +327,7 @@ def test_close_all_keeps_bridge_running_when_visible_page_remains(tmp_path: Path
     context.pages.append(Page(events, "new-visible"))
     runtime.after_response("close-matching")
 
-    assert runtime.service_actions() is False
+    assert runtime.finish_response("close-matching") is False
     assert runtime.shutdown_requested is False
     assert runtime.browser_or_context is context
 

@@ -123,7 +123,13 @@ class LocalBridgeClient:
         return BridgeUnavailable(f"{self.backend_label} bridge call failed: {exc}")
 
     def stop(self) -> str:
-        if not self._health_ok():
+        # Graceful stop is best effort: callers kill the bridge's processes next, which is
+        # what recovers a wedged bridge, so a busy probe must not abort the stop.
+        try:
+            running = self._health_ok()
+        except BridgeUnavailable:
+            return ""
+        if not running:
             return ""
         payload = json.dumps({"name": "stop", "args": {}}).encode()
         try:
@@ -173,14 +179,32 @@ class LocalBridgeClient:
         return data is not None and data.get("status") == "ok"
 
     def _health_payload(self) -> dict[str, object] | None:
+        """Return the bridge's health reply, or None when nothing listens on the port.
+
+        A connection that is accepted but gets no reply means the bridge process is alive
+        but not answering (busy or wedged), not stopped: reading it as stopped sent callers
+        down the launch path against a live browser.
+        """
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=1.0) as response:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=self.timeout_s) as response:
                 data = json.loads(response.read().decode())
                 if response.status != 200 or not isinstance(data, dict):
                     return None
                 return data
-        except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+        except TimeoutError as exc:
+            raise self._bridge_busy() from exc
+        except urllib.error.URLError as exc:
+            if _is_timeout_url_error(exc):
+                raise self._bridge_busy() from exc
             return None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _bridge_busy(self) -> BridgeUnavailable:
+        return BridgeUnavailable(
+            f"{self.backend_label} bridge accepted the health check but did not answer within "
+            f"{self.timeout_s:g}s; another call may still be running{self.timeout_hint}"
+        )
 
     def _wait_until_stopped(self) -> None:
         deadline = time.monotonic() + CHROME_NEW_WINDOW_TIMEOUT_S

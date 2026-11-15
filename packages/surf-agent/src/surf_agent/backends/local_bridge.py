@@ -123,7 +123,13 @@ class LocalBridgeClient:
         return BridgeUnavailable(f"{self.backend_label} bridge call failed: {exc}")
 
     def stop(self) -> str:
-        if not self._health_ok():
+        # Graceful stop is best effort: callers kill the bridge's processes next, which is
+        # what recovers a wedged bridge, so a busy probe must not abort the stop.
+        try:
+            running = self._health_ok()
+        except BridgeUnavailable:
+            return ""
+        if not running:
             return ""
         payload = json.dumps({"name": "stop", "args": {}}).encode()
         try:

@@ -5,7 +5,6 @@ the Patchright objects, so calls on different Surf threads overlap without cross
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
@@ -22,8 +21,6 @@ from ..bridge_common import BridgeCodedError
 BRIDGE_HOST = "127.0.0.1"
 # A wedged call must not keep a stopping bridge alive: uvicorn cancels it after this.
 GRACEFUL_SHUTDOWN_TIMEOUT_S = 5
-# Status for a call abandoned by its client; nobody reads the response.
-CLIENT_CLOSED_REQUEST_STATUS = 499
 
 
 def create_bridge_server(runtime: Any, port: int) -> uvicorn.Server:
@@ -38,11 +35,11 @@ def create_bridge_server(runtime: Any, port: int) -> uvicorn.Server:
     async def call(request: Request) -> Response:
         payload = await request.json()
         name = str(payload.get("name") or "")
-        call_task = asyncio.ensure_future(runtime.call_async(name, payload.get("args") or {}))
-        if not await _finished_before_disconnect(call_task, request):
-            return Response(status_code=CLIENT_CLOSED_REQUEST_STATUS)
+        # A call runs to completion even if its client gives up: cancelling mid-launch,
+        # mid-window-creation or mid-stop would strand half-made browser state. Each call
+        # is bounded by its own Patchright timeouts; stop_bridge() recovers a wedged one.
         try:
-            result = call_task.result()
+            result = await runtime.call_async(name, payload.get("args") or {})
         except Exception as exc:
             code = exc.code if isinstance(exc, BridgeCodedError) else None
             body: dict[str, Any] = {"error": str(exc), "code": code}
@@ -77,28 +74,3 @@ def create_bridge_server(runtime: Any, port: int) -> uvicorn.Server:
     )
     return server
 
-
-async def _finished_before_disconnect(call_task: asyncio.Future[str], request: Request) -> bool:
-    """Wait for the call; cancel it if its client disconnects first.
-
-    A client that timed out has abandoned the call. Left running, the call would hold its
-    Surf thread's lock while health still answers, wedging that thread unseen.
-    """
-    disconnect = asyncio.ensure_future(_wait_for_disconnect(request))
-    try:
-        await asyncio.wait({call_task, disconnect}, return_when=asyncio.FIRST_COMPLETED)
-    except BaseException:
-        # Graceful-shutdown timeout cancels this request; take the call down with it.
-        call_task.cancel()
-        raise
-    finally:
-        disconnect.cancel()
-    if call_task.done():
-        return True
-    call_task.cancel()
-    return False
-
-
-async def _wait_for_disconnect(request: Request) -> None:
-    while (await request.receive())["type"] != "http.disconnect":
-        pass

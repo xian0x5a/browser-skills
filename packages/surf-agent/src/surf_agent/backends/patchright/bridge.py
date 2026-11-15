@@ -443,22 +443,26 @@ class PatchrightRuntime:
         self.shutdown_requested = True
 
     async def finish_response(self, name: str) -> bool:
-        """Run after a call's response is sent; True when this bridge process should exit."""
+        """Run after a call's response is sent; True once this bridge process should exit.
+
+        Explicit stop, idle stop and closed-context restart all end the process. Returns only
+        after the browser has stopped, so a client that relaunches never races the old Chrome.
+        """
         self.after_response(name)
-        if self.shutdown_requested:
+        if self.shutdown_requested and not self._stopping:
             if self._is_busy():
                 self._cancel_shutdown_request()
             else:
-                try:
-                    await self.stop_async()
-                except Exception as exc:
-                    # The close request already succeeded; preserve the runtime on stop failure.
-                    self._stopping = False
-                    self._stop_task = None
-                    print(f"surf-agent: warning: could not stop idle Patchright bridge: {exc}", file=sys.stderr)
-                    return False
-        # Explicit stop, idle stop and closed-context restart all end this process.
-        return self._stopping
+                self._stopping = True
+        if not self._stopping:
+            return False
+        try:
+            await self.stop_async()
+        except Exception as exc:
+            # Exit anyway: calls already answered CONTEXT_RESTART_REQUIRED wait for this
+            # process to go, and stop_bridge() kills whatever the failed stop left behind.
+            print(f"surf-agent: warning: could not stop Patchright bridge cleanly: {exc}", file=sys.stderr)
+        return True
 
     def _is_busy(self) -> bool:
         # An in-flight call may be creating a window that is not visible yet.

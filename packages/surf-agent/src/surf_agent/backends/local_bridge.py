@@ -181,10 +181,9 @@ class LocalBridgeClient:
     def _health_payload(self) -> dict[str, object] | None:
         """Return the bridge's health reply, or None when nothing listens on the port.
 
-        The bridge serves one request at a time, so while another agent's call runs, the
-        connection is accepted but health is answered only after that call. A timeout
-        therefore means busy, not stopped: reading it as stopped sent callers down the
-        launch path against a live browser.
+        A connection that is accepted but gets no reply means the bridge process is alive
+        but not answering (busy or wedged), not stopped: reading it as stopped sent callers
+        down the launch path against a live browser.
         """
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=self.timeout_s) as response:

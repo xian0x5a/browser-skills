@@ -10,6 +10,8 @@ import asyncio
 import json
 import threading
 import time
+import types
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,6 +21,7 @@ import surf_agent.backends.local_bridge as local_bridge
 from surf_agent.errors import BridgeUnavailable
 from surf_agent.backends.patchright.backend import PatchrightBridgeClient
 from surf_agent.backends.patchright.bridge import PageSlot, PatchrightRuntime
+from surf_agent.backends.patchright.constants import CONTEXT_RESTART_REQUIRED
 from runtime_driver import running_bridge
 
 WAIT_S = 3.0
@@ -26,6 +29,15 @@ POLL_S = 0.01
 PROMPT_S = 1.0
 # The gate a test never releases; long enough to outlive every bounded wait below.
 NEVER_S = 30.0
+
+
+async def poll_gate(gate: threading.Event | None) -> None:
+    """Wait on a gate set from the test thread without blocking the server's loop."""
+    deadline = time.monotonic() + NEVER_S
+    while gate is not None and not gate.is_set():
+        if time.monotonic() > deadline:
+            raise AssertionError("gate was never released")
+        await asyncio.sleep(POLL_S)
 
 
 class FakePage:
@@ -53,9 +65,55 @@ class FakePage:
             await asyncio.sleep(POLL_S)
 
 
+class FakeSession:
+    """Answers the CDP calls window creation sends, from the context's page list."""
+
+    def __init__(self, context, page=None):
+        self.context = context
+        self.page = page
+
+    async def send(self, method, params=None):
+        context = self.context
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": self.page.target_id}}
+        if method == "Page.resetNavigationHistory":
+            return {}
+        if method == "Target.getTargets":
+            return {
+                "targetInfos": [
+                    {"targetId": page.target_id, "type": "page"}
+                    for page in context.pages
+                    if not page.is_closed()
+                ]
+            }
+        if method == "Target.closeTarget":
+            for page in context.pages:
+                if page.target_id == params["targetId"]:
+                    page.closed = True
+            return {"success": True}
+        if method == "Target.createTarget":
+            context.create_started.set()
+            await poll_gate(context.create_gate)
+            context.created += 1
+            page = FakePage(f"created-{context.created}")
+            context.pages.append(page)
+            return {"targetId": page.target_id}
+        raise AssertionError(f"unexpected CDP call {method}")
+
+    async def detach(self):
+        pass
+
+
 class FakeContext:
     def __init__(self):
         self.pages: list[FakePage] = []
+        self.created = 0
+        self.create_started = threading.Event()
+        self.create_gate: threading.Event | None = None
+        self.browser = types.SimpleNamespace(new_browser_cdp_session=lambda: FakeSession(self))
+
+    def new_cdp_session(self, page):
+        return FakeSession(self, page)
 
     def new_page(self):
         raise AssertionError("a new page would open a foreground window")
@@ -69,8 +127,12 @@ class FakeManager:
 
     def __init__(self, context: FakeContext):
         self.context = context
+        self.exit_started = threading.Event()
+        self.exit_gate: threading.Event | None = None
 
     async def __aexit__(self, *exc):
+        self.exit_started.set()
+        await poll_gate(self.exit_gate)
         for page in self.context.pages:
             page.closed = True
 
@@ -102,6 +164,26 @@ def register_page(runtime: PatchrightRuntime, thread: str) -> FakePage:
 
 def client(runtime: PatchrightRuntime, port: int, timeout_s: float = WAIT_S) -> PatchrightBridgeClient:
     return PatchrightBridgeClient(timeout_s=timeout_s, port=port, profile_dir=runtime.profile_dir)
+
+
+def raw_call(port: int, name: str, args: dict) -> tuple[int, dict]:
+    # Raw HTTP: the client would answer CONTEXT_RESTART_REQUIRED by relaunching a bridge.
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/call",
+        data=json.dumps({"name": name, "args": args}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=WAIT_S) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode())
+
+
+def health_status(port: int) -> int:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=WAIT_S) as response:
+        return response.status
 
 
 def wait_until(event: threading.Event, what: str) -> None:
@@ -143,20 +225,49 @@ def test_health_answers_quickly_while_a_call_is_in_flight(runtime):
         call.result(timeout=WAIT_S)
 
 
-def test_abandoned_call_releases_its_surf_thread(runtime):
-    page = register_page(runtime, "a")
-    page.sleep_gate = threading.Event()  # never released
-    with running_bridge(runtime) as (_server, port, _thread):
+def test_abandoned_new_call_still_registers_its_window(runtime):
+    context = runtime.browser_or_context
+    context.create_gate = threading.Event()
+    with running_bridge(runtime) as (_server, port, thread):
         with pytest.raises(BridgeUnavailable):
-            client(runtime, port, timeout_s=0.5).call_tool("sleep", {"thread": "a", "milliseconds": 1})
-        assert page.sleep_started.is_set()
+            client(runtime, port, timeout_s=0.5).call_tool("new", {"thread": "a"})
+        assert context.create_started.is_set()
 
-        started = time.monotonic()
-        page.sleep_gate = None  # the next sleep on this thread is not gated
-        result = client(runtime, port).call_tool("sleep", {"thread": "a", "milliseconds": 1})
+        context.create_gate.set()
+        deadline = time.monotonic() + WAIT_S
+        while "a" not in runtime.pages and time.monotonic() < deadline:
+            time.sleep(POLL_S)
+        assert "a" in runtime.pages, "the abandoned call's window was never registered"
+        created = runtime.pages["a"].page
+        assert created.target_id == "created-1" and not created.is_closed()
 
-        assert result == "waited\n"
-        assert time.monotonic() - started < PROMPT_S
+        for name in list(runtime.pages):
+            assert client(runtime, port).call_tool("close", {"thread": name}) == "closed\n"
+
+        thread.join(timeout=WAIT_S)
+        assert not thread.is_alive(), "a stray window kept the bridge busy"
+
+
+def test_calls_during_a_running_stop_get_restart_required_and_server_waits_for_stop(runtime):
+    register_page(runtime, "a")
+    runtime.manager.exit_gate = threading.Event()
+    with running_bridge(runtime) as (_server, port, thread), ThreadPoolExecutor(1) as pool:
+        stop = pool.submit(client(runtime, port).call_tool, "stop", {})
+        wait_until(runtime.manager.exit_started, "the stop to begin")
+
+        status, body = raw_call(port, "sleep", {"thread": "a", "milliseconds": 1})
+
+        assert status == 500
+        assert body["error"] == CONTEXT_RESTART_REQUIRED
+        time.sleep(0.2)
+        assert thread.is_alive()
+        assert health_status(port) == 200, "the port must stay bound while the stop runs"
+        assert not stop.done()
+
+        runtime.manager.exit_gate.set()
+        assert stop.result(timeout=WAIT_S) == "stopped\n"
+        thread.join(timeout=WAIT_S)
+        assert not thread.is_alive()
 
 
 def test_stop_returns_promptly_and_server_exits_despite_in_flight_call(runtime):

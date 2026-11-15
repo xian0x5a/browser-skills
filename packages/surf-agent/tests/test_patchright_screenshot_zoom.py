@@ -26,6 +26,7 @@ from threading import Thread
 import pytest
 
 from surf_agent.backends.patchright import bridge
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 
 pytestmark = pytest.mark.skipif(
@@ -93,7 +94,7 @@ def launch(tmp_path):
         if preferences is not None:
             (profile / "Default").mkdir(parents=True)
             (profile / "Default" / "Preferences").write_text(json.dumps(preferences))
-        runtime = PatchrightRuntime(profile_dir=profile, headless=True)
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=profile, headless=True))
         runtimes.append(runtime)
         return runtime
 

@@ -9,7 +9,6 @@ import math
 import os
 import sys
 import time
-from http.server import HTTPServer
 from pathlib import Path
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
@@ -23,6 +22,7 @@ from .launch_args import STARTUP_PAGE_ARG, capture_default_args, keep_disposable
 from .last_session import forget_last_session
 from .network_capture import NetworkCapture
 from .saved_zoom import clear_saved_zoom
+from .server import create_bridge_server
 from ..bridge_common import (
     CLOSED_TARGET_MESSAGE,
     NATIVE_ARIA_REF_PATTERN,
@@ -30,7 +30,6 @@ from ..bridge_common import (
     SNAPSHOT_DEPTH,
     STALE_REF_MESSAGE,
     BridgeCodedError,
-    BridgeRequestHandler,
     PageSlot,
     bridge_health_payload,
 )
@@ -120,10 +119,8 @@ class PatchrightRuntime:
         self.pages: dict[str, PageSlot] = {}
         self.network = NetworkCapture()
         self._next_page_id = 1
-        self._runner: asyncio.Runner | None = None
         self.shutdown_requested = False
         self._close_shutdown_pending = False
-        self.restart_requested = False
         # Calls from different Surf threads interleave at every await on one event loop.
         # A thread's lock keeps its own calls in order; the browser lock covers launch and
         # window creation through registration, so one creation's unmanaged-tab sweep never
@@ -134,28 +131,22 @@ class PatchrightRuntime:
         # One-way: once stop or restart begins, this process never relaunches the browser;
         # the client relaunches through its cross-process launch guard (cookie preflight).
         self._stopping = False
+        self._stop_task: asyncio.Future[str] | None = None
 
     def health_payload(self) -> dict[str, object]:
         return bridge_health_payload(PATCHRIGHT_BACKEND, self.profile_dir)
 
-    def start(self) -> None:
-        self._run(self._start_async())
-
-    def stop(self) -> str:
+    async def stop_async(self) -> str:
+        """Stop the browser once, however many callers ask (restart, stop, idle, exit)."""
         self._stopping = True
-        result = self._run(self._stop_async())
-        self._close_runner()
-        return result
-
-    def call(self, name: str, args: dict[str, Any]) -> str:
-        result = self._run(self.call_async(name, args))
-        if name == "stop":
-            self._close_runner()
-        return result
+        if self._stop_task is None:
+            self._stop_task = asyncio.ensure_future(self._stop_async())
+        # Shielded: a cancelled caller must not cancel the shared stop.
+        return await asyncio.shield(self._stop_task)
 
     async def call_async(self, name: str, args: dict[str, Any]) -> str:
         if name == "stop":
-            return await self._stop_once()
+            return await self.stop_async()
         self._raise_if_stopping()
         self._calls_in_flight += 1
         try:
@@ -178,29 +169,6 @@ class PatchrightRuntime:
     def _raise_if_stopping(self) -> None:
         if self._stopping:
             raise RuntimeError(CONTEXT_RESTART_REQUIRED)
-
-    async def _stop_once(self) -> str:
-        if self._stopping:
-            return "stopped\n"
-        self._stopping = True
-        return await self._stop_async()
-
-    def _run(self, awaitable: Any) -> Any:
-        if self._runner is None:
-            self._runner = asyncio.Runner()
-        try:
-            return self._runner.run(awaitable)
-        finally:
-            if self.manager is None:
-                # Pure helper calls used by tests never start a browser, but creating
-                # an asyncio.Runner still opens loop resources. Release them once idle.
-                self._close_runner()
-
-    def _close_runner(self) -> None:
-        if self._runner is None:
-            return
-        self._runner.close()
-        self._runner = None
 
     async def _maybe_await(self, value: Any) -> Any:
         if inspect.isawaitable(value):
@@ -474,20 +442,23 @@ class PatchrightRuntime:
             return
         self.shutdown_requested = True
 
-    def service_actions(self) -> bool:
-        if not self.shutdown_requested:
-            return False
-        if self._is_busy():
-            self._cancel_shutdown_request()
-            return False
-        try:
-            self.stop()
-        except Exception as exc:
-            # The close request already succeeded; preserve the runtime on stop failure.
-            self._stopping = False
-            print(f"surf-agent: warning: could not stop idle Patchright bridge: {exc}", file=sys.stderr)
-            return False
-        return True
+    async def finish_response(self, name: str) -> bool:
+        """Run after a call's response is sent; True when this bridge process should exit."""
+        self.after_response(name)
+        if self.shutdown_requested:
+            if self._is_busy():
+                self._cancel_shutdown_request()
+            else:
+                try:
+                    await self.stop_async()
+                except Exception as exc:
+                    # The close request already succeeded; preserve the runtime on stop failure.
+                    self._stopping = False
+                    self._stop_task = None
+                    print(f"surf-agent: warning: could not stop idle Patchright bridge: {exc}", file=sys.stderr)
+                    return False
+        # Explicit stop, idle stop and closed-context restart all end this process.
+        return self._stopping
 
     def _is_busy(self) -> bool:
         # An in-flight call may be creating a window that is not visible yet.
@@ -701,16 +672,12 @@ class PatchrightRuntime:
         # Stop and request a fresh bridge process so LocalBridgeClient.before_start
         # performs the cookie preflight before the next persistent-context launch.
         self._cancel_shutdown_request()
-        # Several in-flight calls can hit the closed context; only the first one stops it.
-        if not self._stopping:
-            self._stopping = True
-            try:
-                await self._stop_async()
-            except Exception:
-                self.manager = None
-                self.browser_or_context = None
-                self.pages.clear()
-            self.restart_requested = True
+        try:
+            await self.stop_async()
+        except Exception:
+            self.manager = None
+            self.browser_or_context = None
+            self.pages.clear()
         raise RuntimeError(CONTEXT_RESTART_REQUIRED)
 
     def _page_is_open(self, page: Any) -> bool:
@@ -940,17 +907,6 @@ class PatchrightRuntime:
         return f"opened {getattr(page, 'url', '')}\n"
 
 
-class RequestHandler(BridgeRequestHandler):
-    runtime: Any
-
-
-class PatchrightHTTPServer(HTTPServer):
-    def service_actions(self) -> None:
-        runtime = RequestHandler.runtime
-        if runtime.restart_requested or runtime.service_actions():
-            self._BaseServer__shutdown_request = True
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=int(os.environ.get("SURF_AGENT_PORT", "9346")))
@@ -966,18 +922,10 @@ def main(argv: list[str] | None = None) -> int:
     default_profile_dir = (Path(home).expanduser() if home else Path(PlatformDirs("surf-agent", appauthor=False).user_data_dir)) / "profiles" / "chrome"
     profile_dir = Path(args.profile_dir).expanduser() if args.profile_dir else default_profile_dir
     disk_cache_dir = Path(args.disk_cache_dir).expanduser() if args.disk_cache_dir else None
-    RequestHandler.runtime = PatchrightRuntime(
+    runtime = PatchrightRuntime(
         profile_dir=profile_dir, disk_cache_dir=disk_cache_dir, headless=args.headless, app_id=args.app_id
     )
-    # Playwright/Patchright sync objects are bound to the thread that created them.
-    # Use a single-threaded HTTP server so every browser call runs on one thread.
-    server = PatchrightHTTPServer(("127.0.0.1", args.port), RequestHandler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        return 130
-    finally:
-        RequestHandler.runtime.stop()
+    create_bridge_server(runtime, args.port).run()
     return 0
 
 

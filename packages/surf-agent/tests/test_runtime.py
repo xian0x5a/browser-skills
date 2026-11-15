@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import surf_agent.backends.patchright.bridge as patchright_bridge
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PageSlot, PatchrightRuntime
 from surf_agent.backends.patchright.constants import CONTEXT_RESTART_REQUIRED
 from surf_agent.errors import BridgeUnavailable
@@ -197,7 +198,7 @@ class RuntimeTests(unittest.TestCase):
                 return FakeSession(self, page)
 
         context = FakeContext()
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = context
 
         slot = runtime._run(runtime._new_page("thread", url="https://welcome.test/"))
@@ -242,7 +243,7 @@ class RuntimeTests(unittest.TestCase):
                 raise AssertionError("closed context must not open a page")
 
         closed_context = ClosedContext()
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = closed_context
         stops = []
 
@@ -257,7 +258,7 @@ class RuntimeTests(unittest.TestCase):
             runtime._run(runtime._new_page("thread", url="https://welcome.test/"))
 
         self.assertEqual(len(stops), 1)
-        self.assertTrue(runtime.restart_requested)
+        self.assertTrue(runtime.finish_response("open"))
         self.assertNotIn("thread", runtime.pages)
         self.assertEqual(
             closed_context.cdp_calls,
@@ -347,7 +348,7 @@ class RuntimeTests(unittest.TestCase):
 
         dead = DeadPage()
         context = FakeContext([dead])
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = context
         runtime.pages["thread"] = patchright_bridge.PageSlot(page=dead, page_id=1)
 
@@ -436,7 +437,7 @@ class RuntimeTests(unittest.TestCase):
 
         context = FakeContext()
         managed = context.pages[0]
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = context
         runtime.pages["managed"] = patchright_bridge.PageSlot(page=managed, page_id=1)
 
@@ -605,10 +606,10 @@ class RuntimeTests(unittest.TestCase):
                 return FakeSession(self, page)
 
         context = FakeContext()
-        runtime = PatchrightRuntime(
+        runtime = SyncRuntime(PatchrightRuntime(
             profile_dir=Path("/tmp/surf-patchright-test"),
             app_id="surf-agent-test",
-        )
+        ))
         runtime.browser_or_context = context
 
         self.assertEqual(
@@ -697,7 +698,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
     def test_patchright_runtime_renames_a_thread_without_replacing_its_page(self):
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         live_page_slot = object()
         runtime.pages["temporary"] = live_page_slot  # type: ignore[assignment]
 
@@ -741,7 +742,7 @@ class RuntimeTests(unittest.TestCase):
                 raise AssertionError(f"unexpected selector: {selector}")
 
         page = FakePage()
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = object()
         runtime.pages["thread"] = PageSlot(page=page, page_id=1)
 
@@ -777,7 +778,7 @@ class RuntimeTests(unittest.TestCase):
                 pass
 
         page = FakePage()
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = types.SimpleNamespace(
             pages=[page], new_page=None, new_cdp_session=lambda page: UnzoomedSession()
         )
@@ -821,7 +822,7 @@ class RuntimeTests(unittest.TestCase):
             def aria_snapshot(self, *args, **kwargs):
                 return '- button "[ref=e999]" [ref=e188]\n- paragraph [ref=e189]: Hello [ref=e777]'
 
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         slot = patchright_bridge.PageSlot(page=FakePage(), page_id=1)
 
         snapshot = runtime._run(runtime._snapshot(slot))
@@ -841,7 +842,7 @@ class RuntimeTests(unittest.TestCase):
                 return '- page "Example"'
 
         page = FakePage()
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         slot = patchright_bridge.PageSlot(page=page, page_id=1)
 
         with (
@@ -873,7 +874,7 @@ class RuntimeTests(unittest.TestCase):
                 return "snapshot body"
 
         page = FakePage()
-        runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+        runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime._run(
             runtime._snapshot(patchright_bridge.PageSlot(page=page, page_id=1))
         )
@@ -1147,7 +1148,7 @@ def test_snapshot_masks_an_input_value_whose_ref_the_browser_cannot_resolve() ->
 
             return fail
 
-    runtime = PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test"))
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
     runtime.browser_or_context = object()
     runtime.pages["thread"] = PageSlot(page=FakePage(), page_id=1)
 

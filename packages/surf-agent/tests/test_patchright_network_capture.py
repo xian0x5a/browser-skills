@@ -9,6 +9,7 @@ from threading import Thread
 
 import pytest
 
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 
 ITEMS = {"items": [{"id": 1, "title": "First"}, {"id": 2, "title": "Second"}], "next": None}
@@ -48,7 +49,7 @@ def site_url(tmp_path):
     reason="requires installed Chrome and Patchright; set SURF_TEST_LIVE_PATCHRIGHT=1",
 )
 def test_first_open_captures_api_response_and_open_clears_it(tmp_path, site_url):
-    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True)
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True))
     try:
         # First call on the thread: the page is created already loading this URL.
         runtime.call("open", {"url": f"{site_url}/index.html"})

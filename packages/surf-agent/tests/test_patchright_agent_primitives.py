@@ -9,6 +9,7 @@ from threading import Thread
 import pytest
 
 from surf_agent.backends.patchright import bridge
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 from surf_agent.errors import ErrorCode
 
@@ -67,7 +68,7 @@ def site(tmp_path):
 def runtime(tmp_path, monkeypatch):
     # Keep failure cases fast; production uses the longer default.
     monkeypatch.setattr(bridge, "ACTION_TIMEOUT_MS", 500)
-    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True)
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True))
     try:
         yield runtime
     finally:

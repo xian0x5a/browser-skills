@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import time
-from http.server import HTTPServer
 from pathlib import Path
-from threading import Thread as WorkerThread
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 import pytest
 
+from runtime_driver import running_bridge
 from surf_agent.backends.base import WaitConditions
-from surf_agent.backends.bridge_common import BridgeCodedError, BridgeRequestHandler
+from surf_agent.backends.bridge_common import BridgeCodedError
 from surf_agent.backends.local_bridge import LocalBridgeBackend, LocalBridgeClient
 from surf_agent.errors import ErrorCode, SurfAgentError
 from surf_agent.thread import Thread
@@ -22,39 +22,33 @@ class StubRuntime:
     def health_payload(self) -> dict[str, object]:
         return {"status": "ok"}
 
-    def call(self, name: str, args: dict[str, object]) -> str:
+    async def call_async(self, name: str, args: dict[str, object]) -> str:
         return self.behavior(name, args)
 
+    async def finish_response(self, _name: str) -> bool:
+        return False
 
-def serve(behavior) -> tuple[HTTPServer, WorkerThread]:
-    handler = type("Handler", (BridgeRequestHandler,), {"runtime": StubRuntime(behavior)})
-    server = HTTPServer(("127.0.0.1", 0), handler)
-    worker = WorkerThread(target=server.serve_forever, daemon=True)
-    worker.start()
-    return server, worker
+    async def stop_async(self) -> str:
+        return "stopped\n"
 
 
 @pytest.fixture
 def bridge_client(tmp_path: Path):
-    servers: list[tuple[HTTPServer, WorkerThread]] = []
+    bridges = ExitStack()
 
     def start(behavior, *, timeout_s: float = 5.0) -> LocalBridgeClient:
-        server, worker = serve(behavior)
-        servers.append((server, worker))
+        _server, port, _thread = bridges.enter_context(running_bridge(StubRuntime(behavior)))
         return LocalBridgeClient(
             backend_label="Stub",
             module_name="unused",
             timeout_s=timeout_s,
-            port=server.server_port,
+            port=port,
             profile_dir=tmp_path,
             startup_error="unused",
         )
 
-    yield start
-    for server, worker in servers:
-        server.shutdown()
-        server.server_close()
-        worker.join(timeout=3)
+    with bridges:
+        yield start
 
 
 def test_bridge_error_code_reaches_the_caller(bridge_client) -> None:

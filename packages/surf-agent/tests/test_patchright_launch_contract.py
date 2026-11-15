@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 from surf_agent.backends.patchright.launch_args import capture_default_args
 
@@ -40,10 +41,10 @@ def test_patchright_hands_its_full_flag_list_to_the_executable(tmp_path):
 def test_windowless_launch_returns_without_a_page(tmp_path):
     # Headed on purpose: headless Chrome opens its first page regardless, so only
     # a headed launch proves Patchright skipped its first-page wait.
-    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=False)
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile", headless=False))
     started = time.monotonic()
     try:
-        runtime.start()
+        runtime._run(runtime._start_async())
         assert time.monotonic() - started < 15
         assert runtime._visible_pages() == []
         assert runtime.call("open", {"thread": "contract", "url": "about:blank"}) == "opened about:blank\n"

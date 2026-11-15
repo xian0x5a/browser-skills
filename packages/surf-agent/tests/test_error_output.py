@@ -14,18 +14,13 @@ import re
 import signal
 import subprocess
 import sys
-from http.server import HTTPServer
 from pathlib import Path
-from threading import Thread as ServerThread
 
 import pytest
 
 import surf_agent
-from surf_agent.backends.bridge_common import (
-    BridgeCodedError,
-    BridgeRequestHandler,
-    bridge_health_payload,
-)
+from runtime_driver import running_bridge
+from surf_agent.backends.bridge_common import BridgeCodedError, bridge_health_payload
 from surf_agent.constants import PATCHRIGHT_BACKEND
 from surf_agent.errors import ErrorCode
 from surf_agent.processes import iter_process_args
@@ -45,8 +40,14 @@ class AlwaysTimingOutBridge:
     def health_payload(self) -> dict[str, object]:
         return bridge_health_payload(PATCHRIGHT_BACKEND, self.profile_dir)
 
-    def call(self, name: str, args: dict[str, object]) -> str:
+    async def call_async(self, name: str, args: dict[str, object]) -> str:
         raise BridgeCodedError(ErrorCode.WAIT_TIMEOUT, BRIDGE_FAILURE)
+
+    async def finish_response(self, _name: str) -> bool:
+        return False
+
+    async def stop_async(self) -> str:
+        return "stopped\n"
 
 
 @pytest.fixture
@@ -54,16 +55,12 @@ def surf_environment(short_tmp_path: Path):
     """Environment for a child interpreter whose Surf calls reach a stub bridge, not Chrome."""
     profile_dir = short_tmp_path / "profile"
     runtime_dir = short_tmp_path / "runtime"
-    handler = type(
-        "Handler", (BridgeRequestHandler,), {"runtime": AlwaysTimingOutBridge(profile_dir)}
-    )
-    server = HTTPServer(("127.0.0.1", 0), handler)
-    server_thread = ServerThread(target=server.serve_forever, daemon=True)
-    server_thread.start()
+    bridge = running_bridge(AlwaysTimingOutBridge(profile_dir))
+    _server, port, _thread = bridge.__enter__()
     environment = dict(os.environ)
     environment.pop("SURF_SESSION_WORKER_COMMAND", None)
     environment.update(
-        SURF_AGENT_PORT=str(server.server_port),
+        SURF_AGENT_PORT=str(port),
         SURF_AGENT_HOME=str(short_tmp_path / "home"),
         SURF_AGENT_PROFILE_DIR=str(profile_dir),
         XDG_RUNTIME_DIR=str(runtime_dir),
@@ -71,9 +68,7 @@ def surf_environment(short_tmp_path: Path):
     try:
         yield environment
     finally:
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=5)
+        bridge.__exit__(None, None, None)
         # A session that was never killed (a test failing midway) must not outlive the test.
         for pid, arguments in iter_process_args():
             command = " ".join(arguments)

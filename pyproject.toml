@@ -7,6 +7,8 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
+# Shared test helpers (runtime_driver) import by module name under importlib mode.
+pythonpath = ["packages/surf-agent/tests"]
 testpaths = ["packages", "tests"]
 
 [tool.uv.workspace]

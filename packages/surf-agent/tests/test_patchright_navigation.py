@@ -8,6 +8,7 @@ from threading import Thread
 
 import pytest
 
+from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
 
 
@@ -38,7 +39,7 @@ def test_back_returns_dom_ready_for_cached_and_reloaded_history(tmp_path, monkey
     worker = Thread(target=server.serve_forever, daemon=True)
     worker.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
-    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True)
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True))
     try:
         runtime.call("open", {"url": f"{base_url}/index.html"})
         page = runtime.pages["default"].page
@@ -98,7 +99,7 @@ def test_open_on_a_new_thread_returns_after_its_slow_page_is_dom_ready(tmp_path)
     worker = Thread(target=server.serve_forever, daemon=True)
     worker.start()
     url = f"http://127.0.0.1:{server.server_port}/slow"
-    runtime = PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True)
+    runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile", headless=True))
     try:
         result = runtime.call("open", {"url": url})
 

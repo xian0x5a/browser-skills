@@ -19,3 +19,13 @@ def isolate_emission_baselines(monkeypatch: pytest.MonkeyPatch) -> None:
     import surf_agent.thread as thread
 
     monkeypatch.setattr(thread, "_baselines", {})
+
+
+@pytest.fixture(autouse=True)
+def close_sync_runtime_loops():
+    """Close the event loops SyncRuntime opened during the test."""
+    from runtime_driver import open_runners
+
+    yield
+    while open_runners:
+        open_runners.pop().close()

@@ -4,7 +4,7 @@ status: done
 
 # Explicit sessions: create, reuse, expire
 
-Tracking issue: [#22](https://github.com/ewgdg/browser-skills/issues/22), still open.
+Tracking issue: [#22](https://github.com/xian0x5a/browser-skills/issues/22), still open.
 
 Status: active and released: implemented in the runtime and the launcher, pinned at `a81b446` and pushed, with the test suites passing and the pinned revision validated without a dependency override.
 

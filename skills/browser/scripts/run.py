@@ -29,7 +29,7 @@ SESSION_VALUES = ("--name", "--ttl", "--timeout")
 WORKER_COMMAND_ENV = "SURF_SESSION_WORKER_COMMAND"
 
 
-REPOSITORY = "git+https://github.com/ewgdg/browser-skills.git"
+REPOSITORY = "git+https://github.com/xian0x5a/browser-skills.git"
 RUNTIME_PIN = Path(__file__).resolve().parents[1] / "runtime-revision"
 
 

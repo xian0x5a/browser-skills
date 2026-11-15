@@ -448,6 +448,6 @@ def test_release_pin_requests_exact_git_revision(installed_skill):
     )
     assert result.returncode == 0, result.stderr
     assert (
-        "surf-agent @ git+https://github.com/ewgdg/browser-skills.git@"
+        "surf-agent @ git+https://github.com/xian0x5a/browser-skills.git@"
         "0123456789abcdef0123456789abcdef01234567#subdirectory=packages/surf-agent"
     ) in result.stdout

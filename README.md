@@ -8,7 +8,7 @@ Pi package for agent browser automation:
 ## Install skills
 
 ```bash
-pi install git:github.com/ewgdg/browser-skills
+pi install git:github.com/xian0x5a/browser-skills
 ```
 
 ## Browser skill workflow

@@ -4,7 +4,7 @@ status: open
 
 # Generic session identity for the persistent interpreter
 
-Tracking issue: [#22 — Add persistent Python execution for multi-turn Surf workflows](https://github.com/ewgdg/browser-skills/issues/22), still open. The session interpreter itself is released; this plan changes how it is keyed and who owns it.
+Tracking issue: [#22 — Add persistent Python execution for multi-turn Surf workflows](https://github.com/xian0x5a/browser-skills/issues/22), still open. The session interpreter itself is released; this plan changes how it is keyed and who owns it.
 
 Status: proposed. Nothing is implemented. Two answers are needed first; both are under "Open decisions".
 

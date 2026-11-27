@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 
 _GOOGLE_HOSTS = frozenset({"google.com", "www.google.com"})
@@ -29,13 +29,13 @@ def clean_destination_url(value: str) -> str:
     if hostname in _GOOGLE_HOSTS:
         raise InvalidDestinationUrl("Google navigation is not an external destination")
 
-    retained_query = urlencode(
-        [
-            (name, parameter_value)
-            for name, parameter_value in parse_qsl(parsed.query, keep_blank_values=True)
-            if name.lower() not in _GOOGLE_TRACKING_PARAMETERS
-        ],
-        doseq=True,
+    # Split the raw query on `&` only, drop tracking parameters, and keep the
+    # rest byte for byte: decoding and re-encoding it corrupted non-UTF-8
+    # values such as GBK and rewrote `?flag`, `;` and unescaped `/`.
+    retained_query = "&".join(
+        parameter
+        for parameter in parsed.query.split("&")
+        if parameter.partition("=")[0].lower() not in _GOOGLE_TRACKING_PARAMETERS
     )
     fragment = parsed.fragment.split(":~:", 1)[0]
     default_port = (parsed.scheme.lower() == "https" and port == 443) or (

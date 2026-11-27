@@ -21,6 +21,8 @@ class SearchPageKind(StrEnum):
 @dataclass(frozen=True)
 class ObservedOrganicResult:
     title: str
+    # The destination as Chrome serializes it, Google redirect wrappers already
+    # resolved by the page script; not necessarily the link's href.
     url: str
     snippet: str | None
     displayed_date: str | None
@@ -234,10 +236,27 @@ GOOGLE_PAGE_OBSERVATION_SCRIPT = r"""
   };
   const isAd = link => Boolean(link.closest(AD_REGIONS))
     || [...link.attributes].some(attribute => isAdClickUrl(attribute.value));
-  const destinationHost = link => {
+  // Google may wrap a result as www.google.com/url?q=<destination> (or /goto,
+  // or url= when q is blank). The wrapper is read here, never fetched, and the
+  // result carries Chrome's serialization of the destination, so the Python
+  // cleaner never re-parses a wrapper: when it did, the two parsers disagreed
+  // on inputs such as https:example.com, failing the whole search.
+  const GOOGLE_REDIRECT_HOSTS = ['google.com', 'www.google.com'];
+  const GOOGLE_REDIRECT_PATHS = ['/url', '/goto'];
+  const MAX_UNWRAPPED_REDIRECTS = 2;
+  const destinationOf = link => {
     try {
-      const url = new URL(link.href);
-      return /^https?:$/.test(url.protocol) && !isGoogleHost(url.hostname) ? url.hostname : null;
+      let url = new URL(link.href);
+      for (let unwrapped = 0; ; unwrapped++) {
+        if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
+        if (!isGoogleHost(url.hostname)) return url;
+        if (unwrapped === MAX_UNWRAPPED_REDIRECTS
+            || !GOOGLE_REDIRECT_HOSTS.includes(url.hostname)
+            || !GOOGLE_REDIRECT_PATHS.includes(url.pathname)) return null;
+        const wrapped = url.searchParams.get('q') || url.searchParams.get('url');
+        if (!wrapped) return null;
+        url = new URL(wrapped);
+      }
     } catch {
       return null;
     }
@@ -245,10 +264,10 @@ GOOGLE_PAGE_OBSERVATION_SCRIPT = r"""
 
   const candidates = [];
   for (const link of document.querySelectorAll('a[href]')) {
-    const host = destinationHost(link);
+    const destination = destinationOf(link);
     const heading = link.querySelector('h3, [role="heading"]');
-    if (!host || !heading || !normalize(heading.innerText) || !isVisible(link)) continue;
-    candidates.push({link, heading, host});
+    if (!destination || !heading || !normalize(heading.innerText) || !isVisible(link)) continue;
+    candidates.push({link, heading, destination});
   }
 
   // A card is Google's result slot when marked, otherwise the widest ancestor
@@ -272,21 +291,22 @@ GOOGLE_PAGE_OBSERVATION_SCRIPT = r"""
   };
 
   const score = (candidate, card) => {
-    const {link, heading, host} = candidate;
+    const {link, heading, destination} = candidate;
     if (link.closest(EXCLUDED_REGIONS)) return RESULT_WEIGHTS.excludedRegion;
     const cardText = normalize(card.innerText).toLowerCase();
     const signals = {
       h3Title: heading.tagName === 'H3',
       ariaHeadingTitle: heading.tagName !== 'H3',
       citeInCard: Boolean(card.querySelector('cite')),
-      hostShownInCard: cardText.includes(host.replace(/^www\./, '')),
+      hostShownInCard: cardText.includes(destination.hostname.replace(/^www\./, '')),
       metadataBlock: Boolean(link.closest('[data-snf]')),
       snippetBlock: Boolean(card.querySelector('[data-sncf]')),
       resultSlot: card.matches('[data-rpos]'),
       mainResults: Boolean(link.closest('#rso, #search')),
       snippetProse: proseBeside(card, card.querySelectorAll('a')).length >= MIN_SNIPPET_LENGTH,
       moduleCard: candidates.filter(other => card.contains(other.link)).length >= MODULE_TITLE_COUNT,
-      adCard: isAd(link),
+      // A click redirect inside a wrapper marks an ad like one on the link itself.
+      adCard: isAd(link) || isAdClickUrl(destination.href),
     };
     return Object.entries(signals)
       .reduce((total, [signal, present]) => total + (present ? RESULT_WEIGHTS[signal] : 0), 0);
@@ -328,7 +348,7 @@ GOOGLE_PAGE_OBSERVATION_SCRIPT = r"""
     const {snippet, displayedDate} = snippetOf(card, best.link);
     return {
       title: normalize(best.heading.innerText),
-      url: best.link.href,
+      url: best.destination.href,
       snippet,
       displayed_date: displayedDate,
     };

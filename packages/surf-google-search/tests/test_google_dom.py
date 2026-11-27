@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import html
 import shlex
 from collections.abc import Iterator
+from urllib.parse import quote
 
 import pytest
 from patchright.sync_api import Browser, sync_playwright
 
 from surf_agent.runtime import find_chrome_bin
 from surf_google_search.browser_port import GOOGLE_PAGE_OBSERVATION_SCRIPT
+from surf_google_search.urls import clean_destination_url
 
 
 @pytest.fixture(scope="module")
@@ -380,3 +383,96 @@ def test_news_module_headlines_are_not_organic_results(browser: Browser) -> None
     observation = observe_fixture(browser, f"<div id='rso'>{ORGANIC_RESULT}{module}</div>{PAGER}")
 
     assert [result["url"] for result in observation["results"]] == ["https://example.com/result"]
+
+
+PLACEHOLDER_URL = "https://placeholder.test/x"
+
+
+def card_linking_to(href: str, *, shown_host: str = "example.com", **fingerprints) -> str:
+    """A result card whose link points at `href` while the card text shows `shown_host`."""
+    card = organic_card(2, PLACEHOLDER_URL, "Wrapped result", **fingerprints)
+    return card.replace(f"href='{PLACEHOLDER_URL}'", f"href='{html.escape(href)}'").replace(
+        "placeholder.test", shown_host
+    )
+
+
+def google_redirect(
+    destination: str,
+    *,
+    host: str = "www.google.com",
+    path: str = "/url",
+    parameter: str = "q",
+) -> str:
+    return f"https://{host}{path}?sa=t&{parameter}={quote(destination, safe='')}&ved=abc"
+
+
+def observed_urls_with_one_ordinary_result(browser: Browser, href: str, **fingerprints) -> list[str]:
+    body = ORGANIC_RESULT + card_linking_to(href, **fingerprints) + PAGER
+    return [result["url"] for result in observe_fixture(browser, body)["results"]]
+
+
+MARKUP_WITHOUT_FINGERPRINTS = {"cite": False, "data_attributes": False}
+DESTINATION = "https://example.com/result?srsltid=tracking#section:~:text=highlight"
+NESTED_ONCE = google_redirect(DESTINATION)
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        pytest.param(google_redirect(DESTINATION), id="url-path-q-parameter"),
+        pytest.param(google_redirect(DESTINATION, path="/goto", parameter="url"), id="goto-path-url-parameter"),
+        pytest.param(f"https://www.google.com/url?q=&url={quote(DESTINATION, safe='')}", id="blank-q-falls-back-to-url"),
+        pytest.param(google_redirect(DESTINATION, host="google.com"), id="bare-google-host"),
+        pytest.param(google_redirect(NESTED_ONCE), id="two-wrapper-levels"),
+    ],
+)
+def test_wrapped_result_is_emitted_as_its_destination(browser: Browser, href: str) -> None:
+    urls = observed_urls_with_one_ordinary_result(browser, href, **MARKUP_WITHOUT_FINGERPRINTS)
+
+    assert urls == ["https://example.com/result", DESTINATION]
+    assert clean_destination_url(urls[1]) == "https://example.com/result#section"
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        pytest.param("https://www.google.com/search?q=other", id="search-navigation"),
+        pytest.param("https://www.google.com/search?q=https%3A%2F%2Fexample.com%2Fx", id="search-for-a-url"),
+        pytest.param("https://www.google.com/aclk?sa=L&adurl=https%3A%2F%2Fexample.com%2Fad", id="ad-redirect"),
+        pytest.param("https://www.google.com/url?sa=t&ved=abc", id="url-without-destination"),
+        pytest.param("https://www.google.com/goto?url=opaque-token", id="goto-with-opaque-token"),
+        pytest.param(google_redirect("https://example.com/news", host="news.google.com"), id="news-subdomain"),
+        pytest.param(google_redirect("https://example.com/uk", host="www.google.co.uk"), id="other-google-domain"),
+        pytest.param(google_redirect("javascript:alert(1)"), id="wrapped-javascript"),
+        pytest.param(google_redirect("file:///etc/passwd"), id="wrapped-file"),
+        pytest.param(google_redirect("/relative/path"), id="wrapped-relative"),
+        pytest.param(google_redirect("https://user:password@example.com/report"), id="wrapped-credentials"),
+        pytest.param(google_redirect("https://www.google.com/search?q=other"), id="wrapped-google-search"),
+        pytest.param(google_redirect("https://example.com:99999/x"), id="wrapped-invalid-port"),
+        pytest.param(google_redirect(google_redirect(NESTED_ONCE)), id="three-wrapper-levels"),
+        pytest.param("https://user:password@example.com/report", id="direct-credentials"),
+    ],
+)
+def test_unusable_links_are_not_results(browser: Browser, href) -> None:
+    observation = observe_fixture(browser, ORGANIC_RESULT + card_linking_to(href) + PAGER)
+
+    assert observation["kind"] == "results"
+    assert [result["url"] for result in observation["results"]] == ["https://example.com/result"]
+
+
+@pytest.mark.parametrize(
+    ("inner", "expected"),
+    [
+        pytest.param("https://@example.com/x", "https://example.com/x", id="empty-userinfo"),
+        pytest.param("https:example.com/x", "https://example.com/x", id="no-slashes"),
+        pytest.param("https://example.com\\@evil.com/x", "https://example.com/@evil.com/x", id="backslash-before-at"),
+        pytest.param(
+            "https://www.google.com/./url?q=https%3A%2F%2Fexample.com%2Fx", "https://example.com/x", id="nested-dot-segment-wrapper"
+        ),
+    ],
+)
+def test_non_canonical_destinations_are_emitted_canonically(browser: Browser, inner, expected) -> None:
+    urls = observed_urls_with_one_ordinary_result(browser, google_redirect(inner), **MARKUP_WITHOUT_FINGERPRINTS)
+
+    assert urls == ["https://example.com/result", expected]
+    assert clean_destination_url(urls[1]) == expected

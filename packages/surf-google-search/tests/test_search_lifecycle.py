@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from surf_google_search.browser_port import (
     BrowserUnavailable,
     ObservedOrganicResult,
@@ -621,8 +623,8 @@ def test_destination_urls_are_cleaned_before_invocation_scoped_deduplication() -
                     None,
                 ),
                 ObservedOrganicResult(
-                    "Duplicate through Google",
-                    "https://www.google.com/url?sa=t&q=https%3A%2F%2Fexample.com%2Fdocs%3Ftopic%3Dsearch%23install&ved=abc",
+                    "Duplicate",
+                    "https://example.com/docs?topic=search#install",
                     "second",
                     None,
                 ),
@@ -650,18 +652,19 @@ def test_destination_urls_are_cleaned_before_invocation_scoped_deduplication() -
     ]
 
 
-def test_direct_google_navigation_destination_fails_closed() -> None:
+@pytest.mark.parametrize(
+    "google_url",
+    [
+        pytest.param("https://www.google.com/search?q=other", id="search-navigation"),
+        pytest.param("https://www.google.com/url?q=https%3A%2F%2Fexample.com", id="unresolved-wrapper"),
+    ],
+)
+def test_google_destination_reaching_the_lifecycle_fails_closed(google_url: str) -> None:
+    # The page script resolves wrappers; a Google URL here means it failed to.
     browser = RecordingBrowser(
         SearchPageObservation(
             kind=SearchPageKind.RESULTS,
-            results=(
-                ObservedOrganicResult(
-                    "Google navigation",
-                    "https://www.google.com/search?q=other",
-                    None,
-                    None,
-                ),
-            ),
+            results=(ObservedOrganicResult("Google link", google_url, None, None),),
             next_url=None,
         )
     )

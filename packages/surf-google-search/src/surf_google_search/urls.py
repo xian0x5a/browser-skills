@@ -4,7 +4,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 _GOOGLE_HOSTS = frozenset({"google.com", "www.google.com"})
-_GOOGLE_REDIRECT_PATHS = frozenset({"/url", "/goto"})
 _GOOGLE_TRACKING_PARAMETERS = frozenset({"srsltid"})
 
 
@@ -13,10 +12,6 @@ class InvalidDestinationUrl(ValueError):
 
 
 def clean_destination_url(value: str) -> str:
-    return _clean_destination_url(value, redirects_remaining=2)
-
-
-def _clean_destination_url(value: str, *, redirects_remaining: int) -> str:
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
@@ -29,17 +24,8 @@ def _clean_destination_url(value: str, *, redirects_remaining: int) -> str:
         raise InvalidDestinationUrl("destination URL must not contain credentials")
 
     hostname = hostname.lower()
-    if hostname in _GOOGLE_HOSTS and parsed.path in _GOOGLE_REDIRECT_PATHS:
-        if redirects_remaining <= 0:
-            raise InvalidDestinationUrl("Google redirect nesting is too deep")
-        parameters = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        destination = parameters.get("q") or parameters.get("url")
-        if not destination:
-            raise InvalidDestinationUrl("Google redirect has no destination")
-        return _clean_destination_url(
-            destination,
-            redirects_remaining=redirects_remaining - 1,
-        )
+    # The page script resolves Google's redirect wrappers, so any Google URL
+    # here, wrapper or navigation, means the observation broke its contract.
     if hostname in _GOOGLE_HOSTS:
         raise InvalidDestinationUrl("Google navigation is not an external destination")
 

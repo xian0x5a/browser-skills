@@ -441,8 +441,6 @@ def test_wrapped_result_is_emitted_as_its_destination(browser: Browser, href: st
         pytest.param("https://www.google.com/aclk?sa=L&adurl=https%3A%2F%2Fexample.com%2Fad", id="ad-redirect"),
         pytest.param("https://www.google.com/url?sa=t&ved=abc", id="url-without-destination"),
         pytest.param("https://www.google.com/goto?url=opaque-token", id="goto-with-opaque-token"),
-        pytest.param(google_redirect("https://example.com/news", host="news.google.com"), id="news-subdomain"),
-        pytest.param(google_redirect("https://example.com/uk", host="www.google.co.uk"), id="other-google-domain"),
         pytest.param(google_redirect("javascript:alert(1)"), id="wrapped-javascript"),
         pytest.param(google_redirect("file:///etc/passwd"), id="wrapped-file"),
         pytest.param(google_redirect("/relative/path"), id="wrapped-relative"),
@@ -458,6 +456,25 @@ def test_unusable_links_are_not_results(browser: Browser, href) -> None:
 
     assert observation["kind"] == "results"
     assert [result["url"] for result in observation["results"]] == ["https://example.com/result"]
+
+
+GOOGLE_OWNED_PAGE = "https://cloud.google.com/run/docs"
+
+
+@pytest.mark.parametrize(
+    ("href", "url"),
+    [
+        pytest.param(GOOGLE_OWNED_PAGE, GOOGLE_OWNED_PAGE, id="cloud-subdomain"),
+        pytest.param("https://support.google.com/mail/answer/1", "https://support.google.com/mail/answer/1", id="support-subdomain"),
+        pytest.param("https://google.github.io/styleguide/", "https://google.github.io/styleguide/", id="google-owned-github-pages"),
+        pytest.param(google_redirect(GOOGLE_OWNED_PAGE), GOOGLE_OWNED_PAGE, id="wrapped-google-owned-site"),
+    ],
+)
+def test_google_owned_sites_are_ordinary_results(browser: Browser, href: str, url: str) -> None:
+    urls = observed_urls_with_one_ordinary_result(browser, href)
+
+    assert urls == ["https://example.com/result", url]
+    assert clean_destination_url(url) == url
 
 
 @pytest.mark.parametrize(

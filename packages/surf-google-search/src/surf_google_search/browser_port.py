@@ -241,7 +241,9 @@ GOOGLE_PAGE_OBSERVATION_SCRIPT = r"""
   // result carries Chrome's serialization of the destination, so the Python
   // cleaner never re-parses a wrapper: when it did, the two parsers disagreed
   // on inputs such as https:example.com, failing the whole search.
-  const GOOGLE_REDIRECT_HOSTS = ['google.com', 'www.google.com'];
+  // Only Search's own hosts (the ones the cleaner rejects) are Google here:
+  // Google-owned sites such as cloud.google.com are ordinary results.
+  const GOOGLE_SEARCH_HOSTS = ['google.com', 'www.google.com'];
   const GOOGLE_REDIRECT_PATHS = ['/url', '/goto'];
   const MAX_UNWRAPPED_REDIRECTS = 2;
   const destinationOf = link => {
@@ -249,9 +251,8 @@ GOOGLE_PAGE_OBSERVATION_SCRIPT = r"""
       let url = new URL(link.href);
       for (let unwrapped = 0; ; unwrapped++) {
         if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
-        if (!isGoogleHost(url.hostname)) return url;
+        if (!GOOGLE_SEARCH_HOSTS.includes(url.hostname)) return url;
         if (unwrapped === MAX_UNWRAPPED_REDIRECTS
-            || !GOOGLE_REDIRECT_HOSTS.includes(url.hostname)
             || !GOOGLE_REDIRECT_PATHS.includes(url.pathname)) return null;
         const wrapped = url.searchParams.get('q') || url.searchParams.get('url');
         if (!wrapped) return null;

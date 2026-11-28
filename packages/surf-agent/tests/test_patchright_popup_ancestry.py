@@ -7,6 +7,7 @@ its popups, and Patchright never reports them.
 """
 from __future__ import annotations
 
+import asyncio
 import itertools
 import types
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 
 from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
+from surf_agent.backends.patchright.tabs import PopupTracker
 
 MISSING_TARGET = "No target with given id found"
 
@@ -75,6 +77,9 @@ class FakePage:
 
     def is_closed(self) -> bool:
         return self.closed
+
+    def on(self, event: str, handler: Callable[..., Any]) -> None:
+        pass  # Patchright never reports these popups, so no event fires
 
     async def close(self) -> None:
         if not self.closed:
@@ -180,3 +185,22 @@ def test_close_closes_popups_chrome_no_longer_links_to_the_thread(scenario):
     runtime.call("close", {"thread": "b"})
     assert chrome.targets == {}
     assert runtime.finish_response("close") is True
+
+
+def test_closing_a_popup_closes_its_child_chrome_re_pointed_to_the_root_meanwhile():
+    chrome = FakeChrome()
+    root = chrome.create_tab("root")
+    popup = chrome.open_popup(root, "popup")
+    child = chrome.open_popup(popup, "child")
+    tracker = PopupTracker(lambda: FakeSession(chrome, None))
+
+    async def scenario() -> None:
+        await tracker.watch()  # replays the tabs with their openers: child -> popup -> root
+        # The fake re-points the child to the root and announces it, as Chrome does when its opener closes.
+        chrome.close_tab(popup)
+        await tracker.close_popups_of(popup)
+
+    asyncio.run(scenario())
+
+    assert child not in chrome.targets, f"left open: {chrome.open_page_urls()}"
+    assert root in chrome.targets

@@ -77,9 +77,10 @@ class PopupTracker:
     def _remember_opener(self, event: dict[str, Any]) -> None:
         info = event["targetInfo"]
         # A tab names its opener from the moment it exists. Later updates may name an
-        # ancestor instead, once the opener closed, or none: keep the last one named.
+        # ancestor instead, once the opener closed, or none: keep the first one named, so
+        # closing a popup still finds the tabs it opened after Chrome re-pointed them.
         if opener := info.get("openerId"):
-            self._opener_of[info["targetId"]] = opener
+            self._opener_of.setdefault(info["targetId"], opener)
 
     def _opened_by(self, opener_target_id: str) -> set[str]:
         opened: set[str] = set()
@@ -88,6 +89,26 @@ class PopupTracker:
             openers = {tab for tab, opener in self._opener_of.items() if opener in openers} - opened
             opened |= openers
         return opened
+
+    def openers_of(self, target_id: str) -> list[str]:
+        """The tabs that opened target_id, nearest first, as recorded: closed ones included."""
+        openers: list[str] = []
+        opener = self._opener_of.get(target_id)
+        while opener is not None:
+            openers.append(opener)
+            opener = self._opener_of.get(opener)
+        return openers
+
+    def recorded_popups_of(self, opener_target_id: str) -> set[str]:
+        """The tabs opener_target_id opened, directly or through others, as recorded so far, closed ones included."""
+        return self._opened_by(opener_target_id)
+
+    async def open_popups_of(self, opener_target_id: str) -> set[str]:
+        """The tabs opener_target_id opened, directly or through others, that Chrome lists now."""
+        session = await self.watch()
+        listed = {tab["targetId"] for tab in await list_tabs(session)}
+        # Only after the list: Chrome announces a tab before it answers a later list.
+        return listed & self._opened_by(opener_target_id)
 
     async def close_popups_of(self, opener_target_id: str) -> None:
         """Close the tabs a closing or closed page opened, directly or through other tabs.

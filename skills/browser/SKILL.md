@@ -95,6 +95,8 @@ thread.emit(thread.snapshot())
 
 Confirm an action's effect with `wait(text)`, `wait(gone=...)` or `wait(url=...)` rather than a fixed sleep. Text conditions match the page's own text, where child elements can join without the space a snapshot name shows: for `option "Cloud Run run.googleapis.com"`, wait for `"Cloud Run"`, one child's text. Read one region by its snapshot ref, `thread.text("@e5")`, and the whole page with `thread.text()`; a CSS selector such as `"main"` matches HTML tags, which apps often replace with ARIA roles. When a call fails, branch on `error.code` ([codes](docs/python-api.md#errors)): `intercepted` names the covering element, `outcome_unknown` means the action may already have happened.
 
+A popup or new tab the page opens, such as a sign-in window, a payment check or a `target=_blank` link, becomes a popup thread: the action that opened it returns a line `opened popup Thread("research/1"): <url>`, and `thread.popups()` lists the open ones, oldest first. Act in it through its own handle, `[login] = thread.popups()`, which raises rather than guess when no popup or several are open; with several, use the name the action announced. `thread` itself stays on its page. A popup that closes itself, as a sign-in window does when it finishes, raises `page_closed` on its handle from then on: treat its result as unknown and check the opener page, for example with `thread.wait(...)`, rather than retrying the closed handle. Close a popup you don't need with its handle's `close()`.
+
 When a feed, list, search result or dashboard loads its data from an API, read that data before scraping the page: `thread.responses()` lists what the page fetched since `open()` with a `shape` preview, and `thread.response_body(key)` returns one body as a Python value to filter in code. Load more by driving the page (scroll, next page, a filter) at its normal pace, then read the new entries. Capture is read-only: let the page make every request, because a request Surf sends itself lacks the page's signed headers and request pattern and exposes the bot. Server-rendered pages fetch nothing; read those with `text()` or snapshots.
 
 Actions and observations are silent; print only useful results. `snapshot().text` is complete. `emit(snapshot)` outputs a numbered observation with explicit BEGIN/END boundaries: full text first, then useful diffs; `emit(snapshot, full=True)` forces full output. Multiple emissions appear in order in the same script output, not separate agent turns. End the script when the next action requires a decision. Read [snapshot semantics](docs/python-api.md#snapshot-output) for the format, baselines or custom sinks.
@@ -130,7 +132,8 @@ thread.responses() -> list[dict[str, Any]]  # API responses since open(): key, u
 thread.response_body(key) -> Any  # parsed JSON or text
 thread.snapshot() -> Snapshot
 thread.emit(snapshot, *, full=False, sink=None) -> None
-thread.close() -> None
+thread.popups() -> list[Thread]  # popup threads this thread's page opened, oldest first
+thread.close() -> None  # also closes its popup threads
 thread.focus() -> None
 ```
 

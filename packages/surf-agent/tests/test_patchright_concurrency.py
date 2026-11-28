@@ -23,6 +23,9 @@ async def bounded(awaitable):
 
 
 class FakePage:
+    def on(self, event, handler):
+        pass
+
     def __init__(self, target_id: str):
         self.target_id = target_id
         self.url = "about:blank"

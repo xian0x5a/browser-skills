@@ -28,9 +28,10 @@ class BridgeCodedError(RuntimeError):
 class PageSlot:
     page: Any
     page_id: int
-    # The page's CDP target, which Chrome names as the opener of the page's popups. It
-    # holds for the page's life: Chrome does not prerender pages Patchright controls
-    # (PrerenderingDisabledByDevTools), so no prerender activation swaps it.
+    # The CDP target of the thread's page, which Chrome names as the opener of the
+    # page's popups. It holds for the page's life: Chrome does not prerender pages
+    # Patchright controls (PrerenderingDisabledByDevTools), so no prerender activation
+    # swaps it.
     target_id: str
 
 

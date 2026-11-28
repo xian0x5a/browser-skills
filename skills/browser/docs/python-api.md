@@ -14,7 +14,9 @@ Except `emit()`, methods return values without printing. Use explicit `print()` 
 
 ### `Thread(name='default')`
 
-Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline.
+Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline. Names you choose use letters, numbers, `.`, `-` and `_`. A popup or tab the thread's page opens, directly or through its popups, becomes a popup thread named `<name>/<n>`, numbered from 1 as the popups appear and never reused while the browser runs (it stops once every thread has closed); only Surf creates those.
+
+Every method works on a popup thread while its page is open, and `open(url)` navigates the popup. Once the popup has closed, every method but `is_open()`, `close()` and `popups()` raises `page_closed`, as does a call in flight when it closes; the message names the thread's pages still open. A popup thread never reopens, since a new window would have lost `window.opener`.
 
 ### `thread.open(url) -> str`
 
@@ -96,9 +98,13 @@ Writes the captured observation to stdout or a text sink; `full=True` forces com
 
 Brings the remembered page forward.
 
+### `thread.popups() -> list[Thread]`
+
+The open popup threads of this thread, oldest first; on a popup thread, those of the thread it belongs to. An action whose output reports it opened a popup, as `opened popup Thread("<name>/<n>"): <url>`, has already added it here. A popup whose page takes over 3 s to start loading is added once it does, and a later action announces it. A tab that never loads a page, such as one answered `204 No Content`, never becomes a popup thread and closes with its thread.
+
 ### `thread.close() -> None`
 
-Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure.
+Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure. On a popup thread, closes that popup and the popups it opened.
 
 ## Snapshot output
 
@@ -197,11 +203,11 @@ Stops the automation bridge and its Chrome.
 
 ### `browser.threads() -> list[ThreadInfo]`
 
-`ThreadInfo(name, page_id, url, title)` entries from the running bridge; does not start a bridge or scan every browser page.
+`ThreadInfo(name, page_id, url, title)` entries from the running bridge, popup threads included; does not start a bridge or scan every browser page.
 
 ### `browser.close_matching(pattern) -> None`
 
-Closes remembered pages whose thread names match the glob, with the popups and tabs they opened.
+Closes remembered pages whose thread names match the glob, with the popups and tabs they opened. Popup threads match too: `app/*` closes every popup of `app`.
 
 ## Errors
 
@@ -214,7 +220,7 @@ Closes remembered pages whose thread names match the glob, with the popups and t
 - `intercepted`: Another element covers the target; the message names it (often a cookie banner or modal). Dismiss it first.
 - `action_timeout`: Element looked actionable but the action did not finish. Snapshot before retrying.
 - `wait_timeout`: A `wait()` condition never held; the message shows what the page showed.
-- `page_closed`: The page closed during the call. Inspect with `is_open()` before reopening.
+- `page_closed`: The page closed during the call. Inspect with `is_open()` before reopening. A popup thread never reopens; the message names its thread's pages still open.
 - `page_zoomed`: From `screenshot()`: the page's browser zoom is not 100%, so the image would show the wrong area. Surf clears saved zoom when it starts Chrome, so someone changed zoom during the session: for this site, or Chrome's default in Settings. Ask them to press Ctrl+0 (Cmd+0 on macOS) in the window, or set Settings > Appearance > Page zoom to 100% if that does not help. Otherwise call `browser.stop_bridge()`, which closes every thread, and reopen the page.
 - `bridge_unavailable`: The browser bridge is not reachable. The call did not reach the browser.
 - `outcome_unknown`: The call reached the browser but its result was lost. It may have taken effect; follow the [recovery workflow](../SKILL.md#recovery).

@@ -15,6 +15,7 @@ from threading import Thread
 import pytest
 
 from surf_agent.backends.bridge_common import BridgeCodedError
+from surf_agent.backends.patchright.tabs import list_tabs
 from surf_agent.errors import ErrorCode
 from test_patchright_screenshot_zoom import fails_if_still_running_after, launch  # noqa: F401
 
@@ -39,7 +40,9 @@ PAGES = {
 <input id="user"><button id="submit" type="submit">Go</button></form>""",
     # A popup that opens a popup of its own.
     "/chain.html": """<title>Chain</title>
-<button id="next" onclick="window.open('/plain.html')">next</button>""",
+<button id="next" onclick="window.open('/plain.html')">next</button>
+<button id="blind" onclick="window.open('/no-content')">blind</button>
+<button id="hop" onclick="window.open('/plain.html'); window.close()">hop</button>""",
     "/plain.html": "<title>Plain</title>plain",
 }
 PAGES["/opener.html"] = """<title>Opener</title>
@@ -49,6 +52,11 @@ PAGES["/opener.html"] = """<title>Opener</title>
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/no-content":
+            # A first response without a document: Chrome opens a tab that never commits a page.
+            self.send_response(204)
+            self.end_headers()
+            return
         template = PAGES.get(path)
         if template is None:
             self.send_error(404)
@@ -95,6 +103,12 @@ def thread_names(runtime) -> list[str]:
 
 def announcement(output: str) -> str:
     return output.rstrip("\n").splitlines()[-1]
+
+
+def open_chain_popup(runtime, site: str) -> None:
+    """Thread `app` with its first popup `app/1`, which holds the `chain.html` buttons."""
+    runtime.call("open", {"thread": "app", "url": f"{site}/opener.html"})
+    runtime.call("click", {"thread": "app", "uid": "#chain"})
 
 
 def open_app(runtime, site: str) -> None:
@@ -183,3 +197,58 @@ def test_eval_that_opens_a_popup_stays_json_and_the_next_action_announces_it(lau
         announced = runtime.call("scroll", {"thread": "app", "direction": "down"})
         assert announcement(announced).startswith('opened popup Thread("app/1"): '), announced
         assert "opened popup" not in runtime.call("scroll", {"thread": "app", "direction": "up"}), "announced twice"
+
+
+def test_popup_that_opens_a_popup_and_closes_itself_hands_the_new_page_to_the_root(launch, site):  # noqa: F811
+    runtime = launch()
+    with fails_if_still_running_after(HUNG_AFTER_S, "popup that hops and closes"):
+        open_chain_popup(runtime, site)
+
+        # The same task opens app/2 and closes app/1, so Chrome's openers are all that link them.
+        output = runtime.call("click", {"thread": "app/1", "uid": "#hop"})
+        assert announcement(output).startswith('opened popup Thread("app/2"): '), f"no announcement:\n{output}"
+        assert "plain.html" in announcement(output)
+        wait_until(runtime, lambda: thread_names(runtime) == ["app", "app/2"], "app/1 to leave and app/2 to be listed")
+        assert runtime.call("text", {"thread": "app/2"}).strip() == "plain"
+
+
+def test_announcement_never_names_a_popup_that_closed_before_the_next_action_output(launch, site):  # noqa: F811
+    runtime = launch()
+    with fails_if_still_running_after(HUNG_AFTER_S, "announcement of a closed popup"):
+        open_app(runtime, site)
+        runtime.call("eval", {"thread": "app", "code": "void window.open('/plain.html')"})
+        wait_until(runtime, lambda: "app/1" in thread_names(runtime), "the popup to be reported as app/1")
+
+        runtime.call("close", {"thread": "app/1"})
+        output = runtime.call("scroll", {"thread": "app", "direction": "down"})
+        assert "opened popup" not in output, f"announced a popup that is closed:\n{output}"
+
+
+def test_closing_a_popup_thread_closes_the_tabs_its_page_opened_that_never_committed(launch, site):  # noqa: F811
+    runtime = launch()
+    with fails_if_still_running_after(HUNG_AFTER_S, "close with an uncommitted tab"):
+        open_chain_popup(runtime, site)
+        session = runtime._run(runtime.browser_or_context.browser.new_browser_cdp_session())
+
+        def tab_urls() -> list[str]:
+            return [tab["url"] for tab in runtime._run(list_tabs(session))]
+
+        # The 204 popup is a blank tab Patchright never reports, so only Chrome lists it.
+        runtime.call("eval", {"thread": "app/1", "code": "document.getElementById('blind').click()"})
+        wait_until(runtime, lambda: len(tab_urls()) == 3, "Chrome to open the tab that never commits")
+
+        runtime.call("close", {"thread": "app/1"})
+        left = tab_urls()
+        assert len(left) == 1 and "opener.html" in left[0], f"tabs the closed popup thread opened are still open: {left}"
+
+
+def test_call_in_flight_when_its_popup_closes_itself_names_the_open_threads(launch, site):  # noqa: F811
+    runtime = launch()
+    with fails_if_still_running_after(HUNG_AFTER_S, "in-flight call on a closing popup"):
+        open_chain_popup(runtime, site)
+        runtime.call("eval", {"thread": "app/1", "code": "void setTimeout(() => window.close(), 300)"})
+
+        with pytest.raises(BridgeCodedError) as failure:
+            runtime.call("wait-for", {"thread": "app/1", "text": "never appears", "timeoutMs": 30000})
+        assert failure.value.code == ErrorCode.PAGE_CLOSED, str(failure.value)
+        assert "open threads of app: app" in str(failure.value), str(failure.value)

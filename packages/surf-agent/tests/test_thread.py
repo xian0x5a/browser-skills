@@ -208,7 +208,8 @@ def test_close_is_silent_through_real_local_backend(monkeypatch: pytest.MonkeyPa
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict[str, object]]] = []
 
-        def call_tool(self, name: str, args: dict[str, object]) -> str:
+        # A running bridge: close reaches it without starting one.
+        def call_tool_if_running(self, name: str, args: dict[str, object]) -> str:
             self.calls.append((name, args))
             return "closed by bridge\n"
 

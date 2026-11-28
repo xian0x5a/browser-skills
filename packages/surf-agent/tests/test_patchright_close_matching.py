@@ -421,3 +421,35 @@ def test_browser_close_all_reaches_patchright_close_matching(tmp_path: Path, cap
 
     assert client.calls == [("close-matching", {"pattern": "*"})]
     assert capsys.readouterr().out == ""
+
+
+def patchright_backend_over(client: LocalBridgeClient) -> PatchrightBackend:
+    agent = SimpleNamespace(patchright_client=client, thread="agent-1")
+    return PatchrightBackend(agent, client=client, welcome_url=lambda: "about:blank")
+
+
+def test_close_without_a_running_bridge_succeeds_without_starting_one(tmp_path: Path) -> None:
+    client = local_client(tmp_path)
+
+    with (
+        patch.object(client, "_health_ok", return_value=False),
+        patch.object(client, "_ensure_running", side_effect=AssertionError("close started a bridge")),
+        patch("surf_agent.backends.local_bridge.urllib.request.urlopen") as urlopen,
+    ):
+        assert patchright_backend_over(client).close() == 0
+
+    urlopen.assert_not_called()
+
+
+def test_close_with_a_running_bridge_sends_the_close_call(tmp_path: Path) -> None:
+    client = local_client(tmp_path)
+
+    with (
+        patch.object(client, "_health_ok", return_value=True),
+        patch.object(client, "_ensure_running"),
+        patch("surf_agent.backends.local_bridge.urllib.request.urlopen", return_value=bridge_response("closed\n")) as urlopen,
+    ):
+        assert patchright_backend_over(client).close() == 0
+
+    assert urlopen.call_count == 1
+    assert json.loads(urlopen.call_args.args[0].data)["name"] == "close"

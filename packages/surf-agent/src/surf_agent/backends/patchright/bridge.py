@@ -123,8 +123,8 @@ class PatchrightRuntime:
         self._close_shutdown_pending = False
         # Calls from different Surf threads interleave at every await on one event loop.
         # A thread's lock keeps its own calls in order; the browser lock covers launch and
-        # window creation through registration, so one creation's unmanaged-tab sweep never
-        # sees another thread's unregistered window.
+        # window creation, so two creations never both find Chrome windowless and each
+        # close the other's new window as a restored tab.
         self._thread_locks: dict[str, asyncio.Lock] = {}
         self._browser_lock = asyncio.Lock()
         self._calls_in_flight = 0
@@ -506,8 +506,6 @@ class PatchrightRuntime:
                 # Manual window close can close the whole persistent context; the client
                 # relaunches it in a fresh bridge process and retries the request.
                 await self._restart_closed_context()
-            # Register before releasing the lock: the next creation's sweep keeps only
-            # registered windows.
             slot = PageSlot(page=page, page_id=self._next_page_id)
             self._next_page_id += 1
             self.pages[thread] = slot
@@ -535,14 +533,21 @@ class PatchrightRuntime:
 
     async def _create_new_window_page(self) -> Any:
         context = self._context()
-        excluded_page_ids = {id(page) for page in self._open_managed_pages()}
-        managed_target_ids = await self._managed_target_ids(context)
+        # Look for the new window only among pages that appear after it is created. Asking
+        # a page that was already open for its target would hang if that page is stuck in
+        # a script: detaching the session first sends the page's renderer
+        # Runtime.runIfWaitingForDebugger, which it never answers. Hold the pages, not
+        # their id()s: a page freed meanwhile could pass its id on to the new one.
+        existing_pages = list(context.pages)
         session = None
         target_id: str | None = None
         try:
             # Browser-level: a page-level session needs an open page, and opening one
             # while Chrome has no window shows it in the foreground.
             session = await self._maybe_await(context.browser.new_browser_cdp_session())
+            # Chrome restores the last session's tabs only into a window it opens after
+            # having none: at launch, or after a human closes every Surf window.
+            chrome_was_windowless = not await self._tab_target_ids(session)
             # Background: a foreground window activates Chrome and steals focus from the
             # user's app (measured on macOS). Thread.focus() raises a window on request.
             response = await self._maybe_await(
@@ -552,52 +557,55 @@ class PatchrightRuntime:
             if not isinstance(target_id, str) or not target_id:
                 raise RuntimeError("Patchright CDP Target.createTarget returned no valid target")
             try:
-                page = await self._wait_for_created_target_page(context, excluded_page_ids, target_id)
+                page = await self._wait_for_created_target_page(context, existing_pages, target_id)
             except Exception:
                 await self._best_effort_close_target(session, target_id)
                 raise
-            # Sweep only once the new window exists: closing the last stray window first
-            # would leave Chrome windowless, and Chrome restores the last session's tabs
-            # into the next window it opens after having none (as when a human closes
-            # every Surf window). The restored tabs were present when open() returned in
-            # every live run; one restored later stays until the next window's sweep.
-            await self._close_unmanaged_tabs(session, keep_target_ids={*managed_target_ids, target_id})
+            finally:
+                # Even when the window failed: restored tabs left as Chrome's only tabs
+                # would make every later creation skip this sweep.
+                if chrome_was_windowless:
+                    await self._close_restored_tabs(session, new_window_target_id=target_id)
             return page
         finally:
             await self._best_effort_detach(session)
 
-    def _open_managed_pages(self) -> list[Any]:
-        return [slot.page for slot in self.pages.values() if self._page_is_open(slot.page)]
-
-    async def _managed_target_ids(self, context: Any) -> set[str]:
-        target_ids = {await self._page_target_id(context, page) for page in self._open_managed_pages()}
-        return {target_id for target_id in target_ids if target_id is not None}
-
-    async def _close_unmanaged_tabs(self, session: Any, *, keep_target_ids: set[str]) -> None:
+    async def _tab_target_ids(self, session: Any) -> list[str]:
         # Read tabs from CDP rather than context.pages: Patchright never lists tabs that
-        # Chrome restored from the last session, so they would stay open for good.
-        # Chrome's own UI is type "browser_ui", and a subtype marks a page that is not a
-        # tab, such as a prerender.
+        # Chrome restored from the last session. Chrome's own UI is type "browser_ui", and
+        # a subtype marks a page that is not a tab, such as a prerender.
         response = await self._maybe_await(session.send("Target.getTargets"))
-        for target in response["targetInfos"]:
-            if target["type"] != "page" or target.get("subtype") or target["targetId"] in keep_target_ids:
+        return [
+            target["targetId"]
+            for target in response["targetInfos"]
+            if target["type"] == "page" and not target.get("subtype")
+        ]
+
+    async def _close_restored_tabs(self, session: Any, *, new_window_target_id: str) -> None:
+        # Chrome was windowless, so every other tab was restored into the new window, and
+        # restored tabs are orphans: threads never outlive their windows. While any window
+        # is open, other tabs belong to someone, such as a popup a thread's page opened or
+        # a tab a human opened, so they are never swept. The restored tabs were present
+        # when open() returned in every live run; one restored later stays open.
+        for target_id in await self._tab_target_ids(session):
+            if target_id == new_window_target_id:
                 continue
             try:
-                await self._maybe_await(session.send("Target.closeTarget", {"targetId": target["targetId"]}))
+                await self._maybe_await(session.send("Target.closeTarget", {"targetId": target_id}))
             except Exception as exc:
                 # The tab can close on its own between listing and closing.
                 if MISSING_TARGET_MESSAGE not in str(exc):
                     raise
 
     async def _wait_for_created_target_page(
-        self, context: Any, excluded_page_ids: set[int], target_id: str
+        self, context: Any, existing_pages: list[Any], target_id: str
     ) -> Any:
         deadline = time.monotonic() + CDP_NEW_WINDOW_TIMEOUT_S
         while time.monotonic() < deadline:
             candidates = [
                 page
                 for page in list(context.pages)
-                if id(page) not in excluded_page_ids and self._page_is_open(page)
+                if not any(page is existing for existing in existing_pages) and self._page_is_open(page)
             ]
             for page in candidates:
                 if await self._page_target_id(context, page) == target_id:

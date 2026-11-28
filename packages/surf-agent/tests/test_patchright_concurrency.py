@@ -8,7 +8,6 @@ so the calls interleave there; every wait is bounded so a regression fails, not 
 import asyncio
 import types
 
-import pytest
 
 import surf_agent.backends.patchright.bridge as bridge
 from surf_agent.backends.patchright.bridge import PageSlot, PatchrightRuntime

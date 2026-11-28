@@ -83,8 +83,8 @@ HIT_TEST_BLOCKER_JS = """element => {
 }"""
 CDP_NEW_WINDOW_TIMEOUT_S = 3.0
 CDP_NEW_WINDOW_POLL_INTERVAL_S = 0.05
-# Patchright reports a popup once its renderer has set the page up, which a busy page
-# can delay; past this, the next action's output announces it instead.
+# Patchright reports a popup once its first navigation commits, which a slow server
+# delays; past this, the next action's output announces it instead.
 POPUP_REPORT_TIMEOUT_S = 3.0
 POPUP_REPORT_POLL_INTERVAL_S = 0.05
 # Linux v11 cookies require Chrome’s real OS password store/keychain, not Patchright automation defaults.
@@ -97,8 +97,9 @@ BLANK_PAGE_URL = "about:blank"
 COMMANDS_WITHOUT_THREAD_LOCK = frozenset({"list", "state", "close-matching", "rename-thread"})
 # Commands whose output reports an action, and so also the popups it opened. JSON
 # output and page text never carry them: they would no longer parse, or read as page.
+# Nor does focus: Thread.focus() drops its output, and focusing opens no popup.
 ACTION_COMMANDS = frozenset(
-    {"new", "open", "back", "click", "click-at", "fill", "upload", "type", "press", "scroll", "sleep", "wait-for", "focus"}
+    {"new", "open", "back", "click", "click-at", "fill", "upload", "type", "press", "scroll", "sleep", "wait-for"}
 )
 # Chrome's Page.resetNavigationHistory error while a back/forward navigation is pending.
 HISTORY_NAVIGATION_PENDING_MESSAGE = "History cannot be pruned"
@@ -130,9 +131,12 @@ class PatchrightRuntime:
         self._popups = PopupTracker(lambda: self._context().browser.new_browser_cdp_session())
         self._next_page_id = 1
         # Per thread: the last popup thread number given, never reused so a stale handle
-        # can't reach a newer popup, and the popups no action output announced yet.
+        # can't reach a newer popup, and the popup threads no action output announced yet.
         self._popup_numbers: dict[str, int] = {}
         self._unannounced_popups: dict[str, list[str]] = {}
+        # One new page at a time, in the order Patchright reports them, so popup thread
+        # numbers follow the order the popups opened.
+        self._adopting = asyncio.Lock()
         self.shutdown_requested = False
         self._close_shutdown_pending = False
         # Calls from different Surf threads interleave at every await on one event loop.
@@ -175,6 +179,10 @@ class PatchrightRuntime:
             raise
         except Exception as exc:
             if self._is_closed_target_error(exc):
+                thread = str(args.get("thread") or "default")
+                if self._is_popup_thread(thread):
+                    # A popup can close itself mid-call, as a sign-in window does.
+                    raise self._closed_popup_thread_error(thread) from exc
                 raise BridgeCodedError(ErrorCode.PAGE_CLOSED, str(exc)) from exc
             raise
         finally:
@@ -184,15 +192,14 @@ class PatchrightRuntime:
         root = self._root_of(thread)
         root_target_id = self._target_id_of(root)
         recorded = self._popups.recorded_popups_of(root_target_id) if root_target_id else set()
-        reported = self._popup_numbers.get(root, 0)
         output = await self._call_async(name, args)
-        await self._wait_for_popups_reported_since(root, recorded, reported)
-        return output + "".join(self._unannounced_popups.pop(root, []))
+        await self._wait_for_popups_adopted_since(root, recorded)
+        return output + self._announce_popups(root)
 
-    async def _wait_for_popups_reported_since(self, root: str, recorded: set[str], reported: int) -> None:
+    async def _wait_for_popups_adopted_since(self, root: str, recorded: set[str]) -> None:
         # Patchright's click does not always wait for the popup it opened, and reports a
-        # popup only once it has set the page up. Wait for every popup Chrome opened
-        # during the action, so the action's output names it and popups() lists it.
+        # popup only once its first navigation commits. Wait for every popup Chrome
+        # opened during the action, so the action's output names it and popups() lists it.
         root_target_id = self._target_id_of(root)
         # Chrome creates a popup, and announces it, before it acknowledges the input that
         # opened it, so an action that opened none needs no round trip to Chrome.
@@ -201,10 +208,16 @@ class PatchrightRuntime:
         deadline = time.monotonic() + POPUP_REPORT_TIMEOUT_S
         while time.monotonic() < deadline:
             opened = await self._popups.open_popups_of(root_target_id) - recorded
-            if self._popup_numbers.get(root, 0) - reported >= len(opened):
+            if opened <= {slot.target_id for slot in self.pages.values()}:
                 return
             await asyncio.sleep(POPUP_REPORT_POLL_INTERVAL_S)
         # Past this, a later action's output announces it.
+
+    def _announce_popups(self, root: str) -> str:
+        # Only the ones still open, with the URL they have now: a popup can close, or its
+        # thread be closed, before an action output announces it.
+        names = [name for name in self._unannounced_popups.pop(root, []) if name in self.pages]
+        return "".join(f'opened popup Thread("{name}"): {self._page_url(self.pages[name].page)}\n' for name in names)
 
     def _target_id_of(self, thread: str) -> str | None:
         slot = self.pages.get(thread)
@@ -275,6 +288,7 @@ class PatchrightRuntime:
             )
         )
         self.network.attach(self.browser_or_context)
+        self.browser_or_context.on("page", self._adopt_if_popup)
 
     async def _stop_async(self) -> str:
         if self.manager is not None:
@@ -305,8 +319,6 @@ class PatchrightRuntime:
                 raise RuntimeError("rename-thread requires destination_thread")
             if self._is_popup_thread(thread) or self._is_popup_thread(destination_thread):
                 raise RuntimeError("popup threads keep the names Surf gave them")
-            if self._popup_threads_opened_by(thread):
-                raise RuntimeError(f"thread {thread} has open popup threads; close them before renaming it")
             if thread == destination_thread:
                 if thread not in self.pages:
                     raise RuntimeError(f"thread not found: {thread}")
@@ -319,12 +331,14 @@ class PatchrightRuntime:
                     raise RuntimeError(f"thread not found: {thread}")
                 if destination_thread in self.pages:
                     raise RuntimeError(f"thread already exists: {destination_thread}")
+                if self._popup_threads_of(thread):
+                    raise RuntimeError(f"thread {thread} has open popup threads; close them before renaming it")
                 self.pages[destination_thread] = self.pages.pop(thread)
             return f"renamed {destination_thread}\n"
         if name == "close":
             old = self.pages.pop(thread, None)
             if old:
-                await self._close_thread_pages(thread, old)
+                await self._close_thread_pages(old)
             # The HTTP handler arms this only after its success response is written.
             self._close_shutdown_pending = True
             return "closed\n"
@@ -343,7 +357,7 @@ class PatchrightRuntime:
                         continue
                     item = {"thread": managed_thread, "page_id": slot.page_id}
                     try:
-                        await self._close_thread_pages(managed_thread, slot)
+                        await self._close_thread_pages(slot)
                     except Exception:
                         result["failed"].append(item)
                     else:
@@ -556,7 +570,7 @@ class PatchrightRuntime:
         self._cancel_shutdown_request()
         old = self.pages.pop(thread, None)
         if old:
-            await self._close_thread_pages(thread, old)
+            await self._close_thread_pages(old)
         async with self._browser_lock:
             self._raise_if_stopping()
             try:
@@ -572,7 +586,6 @@ class PatchrightRuntime:
             slot = PageSlot(page=page, page_id=self._next_page_id, target_id=target_id)
             self._next_page_id += 1
             self.pages[thread] = slot
-            self._adopt_popups(page)
         if url and url != BLANK_PAGE_URL:
             # Navigate here rather than handing the URL to Target.createTarget: the target
             # appears before that navigation commits, so the page came back without its URL
@@ -581,42 +594,38 @@ class PatchrightRuntime:
             await self._forget_blank_history_entry(page)
         return slot
 
-    def _adopt_popups(self, opener_page: Any) -> None:
-        """Give each popup opener_page opens to its thread's family as a popup thread (docs/adr/0012)."""
-
-        def adopt(popup: Any) -> None:
-            # Looked up now, not when subscribing: the opener's thread may have been renamed since.
-            opener = self._thread_of(opener_page)
-            if opener is None:
-                # Its thread has let go of the page, and the tracker closes what it opened.
+    async def _adopt_if_popup(self, page: Any) -> None:
+        """Give a popup to the thread whose page opened it, directly or through other tabs, as a popup thread (docs/adr/0012)."""
+        async with self._adopting:
+            # Kept attached: detaching a page session can hang on a busy renderer (issue #53).
+            target_id = await self._page_target_id(page.context, page, keep_session=True)
+            if target_id is None:
                 return
-            root = self._root_of(opener)
+            # Chrome's recorded openers, not Patchright's: Patchright names no opener, and
+            # fires no popup event, once the opener closed, as when a popup opens another
+            # and closes itself in one go.
+            threads_by_target = {slot.target_id: name for name, slot in self.pages.items()}
+            owner = next(
+                (threads_by_target[opener] for opener in self._popups.openers_of(target_id) if opener in threads_by_target),
+                None,
+            )
+            if owner is None:
+                # A thread's own window, or a tab of a page no thread holds, which closes
+                # with the thread that let it go.
+                return
+            root = self._root_of(owner)
             number = self._popup_numbers.get(root, 0) + 1
             self._popup_numbers[root] = number
             name = f"{root}{POPUP_THREAD_SEPARATOR}{number}"
-            self.pages[name] = PageSlot(page=popup, page_id=self._next_page_id, target_id=None, opener=opener)
+            self.pages[name] = PageSlot(page=page, page_id=self._next_page_id, target_id=target_id)
             self._next_page_id += 1
-            self._unannounced_popups.setdefault(root, []).append(
-                f'opened popup Thread("{name}"): {self._page_url(popup)}\n'
-            )
-            popup.on("close", lambda _page: self._forget_popup_thread(name, popup))
-            self._adopt_popups(popup)
-
-        opener_page.on("popup", adopt)
+            self._unannounced_popups.setdefault(root, []).append(name)
+            page.on("close", lambda _page: self._forget_popup_thread(name, page))
 
     def _forget_popup_thread(self, name: str, page: Any) -> None:
         slot = self.pages.get(name)
-        if slot is None or slot.page is not page:
-            return
-        del self.pages[name]
-        # Its popups pass to its own opener, as Chrome hands them on, so closing that
-        # thread still closes them.
-        for popup in self.pages.values():
-            if popup.opener == name:
-                popup.opener = slot.opener
-
-    def _thread_of(self, page: Any) -> str | None:
-        return next((name for name, slot in self.pages.items() if slot.page is page), None)
+        if slot is not None and slot.page is page:
+            del self.pages[name]
 
     def _is_popup_thread(self, thread: str) -> bool:
         return POPUP_THREAD_SEPARATOR in thread
@@ -629,15 +638,6 @@ class PatchrightRuntime:
         prefix = root + POPUP_THREAD_SEPARATOR
         return sorted((name for name in self.pages if name.startswith(prefix)), key=lambda name: int(name.removeprefix(prefix)))
 
-    def _popup_threads_opened_by(self, thread: str) -> list[str]:
-        """The popup threads thread's page opened, and the ones those opened in turn."""
-        openers = {thread}
-        # In opening order, each opener comes before the popups it opened.
-        for name in self._popup_threads_of(self._root_of(thread)):
-            if self.pages[name].opener in openers:
-                openers.add(name)
-        return [name for name in self._popup_threads_of(self._root_of(thread)) if name in openers - {thread}]
-
     def _closed_popup_thread_error(self, thread: str) -> BridgeCodedError:
         root = self._root_of(thread)
         open_threads = [
@@ -645,20 +645,16 @@ class PatchrightRuntime:
         ]
         return BridgeCodedError(
             ErrorCode.PAGE_CLOSED,
-            f"popup thread {thread} has closed, and popup threads never reopen; "
+            f"popup thread {thread} is not open, and popup threads never reopen; "
             f"open threads of {root}: {', '.join(open_threads) or 'none'}",
         )
 
-    async def _close_thread_pages(self, thread: str, slot: PageSlot) -> None:
-        # The popup threads this page opened close with it: through Patchright here, so
-        # closing a popup thread takes its own popups along.
-        for page in [slot.page, *(self.pages[name].page for name in self._popup_threads_opened_by(thread))]:
-            if self._page_is_open(page):
-                await self._maybe_await(page.close())
-        if slot.target_id is not None:
-            # Even when the page had already closed, as when a human closed it: every tab
-            # it opened, reported by Patchright or not, still belongs to the thread.
-            await self._popups.close_popups_of(slot.target_id)
+    async def _close_thread_pages(self, slot: PageSlot) -> None:
+        if self._page_is_open(slot.page):
+            await self._maybe_await(slot.page.close())
+        # Even when the page had already closed, as when a human closed it: every tab it
+        # opened, its popup threads and the tabs Patchright never reported, belongs to it.
+        await self._popups.close_popups_of(slot.target_id)
 
     async def _forget_blank_history_entry(self, page: Any) -> None:
         # The window commits about:blank before its first page, so back() would return
@@ -766,7 +762,7 @@ class PatchrightRuntime:
                 "or stop the bridge, which closes every thread and clears saved zoom at the next launch",
             )
 
-    async def _page_target_id(self, context: Any, page: Any) -> str | None:
+    async def _page_target_id(self, context: Any, page: Any, *, keep_session: bool = False) -> str | None:
         session = None
         try:
             session = await self._maybe_await(context.new_cdp_session(page))
@@ -782,7 +778,8 @@ class PatchrightRuntime:
                 return None
             raise
         finally:
-            await self._best_effort_detach(session)
+            if not keep_session:
+                await self._best_effort_detach(session)
 
     async def _best_effort_close_target(self, session: Any, target_id: str) -> None:
         try:

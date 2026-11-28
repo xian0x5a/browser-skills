@@ -89,6 +89,15 @@ class PopupTracker:
             opened |= openers
         return opened
 
+    def openers_of(self, target_id: str) -> list[str]:
+        """The tabs that opened target_id, nearest first, as recorded: closed ones included."""
+        openers: list[str] = []
+        opener = self._opener_of.get(target_id)
+        while opener is not None:
+            openers.append(opener)
+            opener = self._opener_of.get(opener)
+        return openers
+
     def recorded_popups_of(self, opener_target_id: str) -> set[str]:
         """The tabs opener_target_id opened, directly or through others, as recorded so far, closed ones included."""
         return self._opened_by(opener_target_id)

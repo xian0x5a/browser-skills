@@ -178,6 +178,8 @@ def test_eval_that_opens_a_popup_stays_json_and_the_next_action_announces_it(lau
         wait_until(runtime, lambda: len(open_pages(runtime)) == 2, "Patchright to report the popup")
 
         assert "opened popup" not in runtime.call("list", {})
-        announced = runtime.call("focus", {"thread": "app"})
+        # Not focus: Thread.focus() drops its output, so focus never carries announcements.
+        assert "opened popup" not in runtime.call("focus", {"thread": "app"})
+        announced = runtime.call("scroll", {"thread": "app", "direction": "down"})
         assert announcement(announced).startswith('opened popup Thread("app/1"): '), announced
-        assert "opened popup" not in runtime.call("focus", {"thread": "app"}), "announced twice"
+        assert "opened popup" not in runtime.call("scroll", {"thread": "app", "direction": "up"}), "announced twice"

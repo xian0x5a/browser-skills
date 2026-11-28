@@ -9,6 +9,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
@@ -142,6 +143,12 @@ class PatchrightRuntime:
         self._adopting = asyncio.Lock()
         self.shutdown_requested = False
         self._close_shutdown_pending = False
+        # Set once any page has closed since launch: from then on, the bridge stops as
+        # soon as no page is left, however the last one went (issue #77).
+        self._page_closed = False
+        # Set by the server: runs its post-response stop check when no response will
+        # follow, as when a human closes the last window.
+        self.on_idle: Callable[[], None] | None = None
         # Calls from different Surf threads interleave at every await on one event loop.
         # A thread's lock keeps its own calls in order; the browser lock covers launch and
         # window creation, so two creations never both find Chrome windowless and each
@@ -292,6 +299,7 @@ class PatchrightRuntime:
         )
         self.network.attach(self.browser_or_context)
         self.browser_or_context.on("page", self._adopt_if_popup)
+        self.browser_or_context.on("page", lambda page: page.on("close", self._on_page_closed))
 
     async def _stop_async(self) -> str:
         if self.manager is not None:
@@ -516,12 +524,18 @@ class PatchrightRuntime:
         raise RuntimeError(f"unsupported Patchright command: {name}")
 
     def after_response(self, name: str) -> None:
-        if name not in {"close", "close-matching"} or not self._close_shutdown_pending:
+        closed_by_surf = name in {"close", "close-matching"} and self._close_shutdown_pending
+        if closed_by_surf:
+            self._close_shutdown_pending = False
+        if (closed_by_surf or self._page_closed) and not self._is_busy():
+            self.shutdown_requested = True
+
+    def _on_page_closed(self, _page: Any) -> None:
+        self._page_closed = True
+        if self._stopping or self._is_busy() or self.on_idle is None:
+            # A call in flight runs the check once it has answered.
             return
-        self._close_shutdown_pending = False
-        if self._is_busy():
-            return
-        self.shutdown_requested = True
+        self.on_idle()
 
     async def finish_response(self, name: str) -> bool:
         """Run after a call's response is sent; True once this bridge process should exit.

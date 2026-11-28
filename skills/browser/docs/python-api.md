@@ -24,7 +24,7 @@ Navigation output; creates a window if missing; resets the emission baseline.
 
 ### `thread.is_open() -> bool`
 
-Checks without opening a window or starting a bridge. An unavailable bridge returns false without proving the page is gone. Malformed responses raise.
+Checks without opening a window or starting a bridge. An unavailable bridge returns false without proving the page is gone. Also false once the thread's window was closed outside Surf, as by a human. The bridge still remembers the thread: `close()` it, or its next page command opens a new window (blank, unless that command is `open(url)`) and closes the popups the old page left. Malformed responses raise.
 
 ### `thread.click(target) -> str`
 
@@ -203,7 +203,7 @@ Stops the automation bridge and its Chrome.
 
 ### `browser.threads() -> list[ThreadInfo]`
 
-`ThreadInfo(name, page_id, url, title)` entries from the running bridge, popup threads included; does not start a bridge or scan every browser page.
+`ThreadInfo(name, page_id, url, title)` entries for the threads whose page is open in the running bridge, popup threads included; does not start a bridge or scan every browser page. A page too busy to answer within 1 s, such as one stuck in a script, is listed with an empty title.
 
 ### `browser.close_matching(pattern) -> None`
 

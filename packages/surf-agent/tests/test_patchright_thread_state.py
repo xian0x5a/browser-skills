@@ -16,7 +16,6 @@ from test_patchright_screenshot_zoom import (  # noqa: F401
     UNFROZEN_URL,
     fails_if_still_running_after,
     launch,
-    page_value,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -64,3 +63,15 @@ def test_state_reports_a_thread_closed_outside_surf_as_not_open(launch):  # noqa
         state = json.loads(runtime.call("state", {"thread": "closed-by-human"}))
     assert state["open"] is False
     assert json.loads(runtime.call("state", {"thread": "kept"}))["open"] is True
+
+
+def test_list_omits_a_thread_closed_outside_surf(launch):  # noqa: F811
+    runtime = launch()
+    runtime.call("open", {"thread": "kept", "url": UNFROZEN_URL})
+    runtime.call("open", {"thread": "closed-by-human", "url": UNFROZEN_URL})
+
+    runtime._run(runtime.pages["closed-by-human"].page.close())
+
+    with fails_if_still_running_after(STATE_READ_DEADLINE_S, "list after a page closed"):
+        listed = json.loads(runtime.call("list", {}))
+    assert [row["thread"] for row in listed["pages"]] == ["kept"]

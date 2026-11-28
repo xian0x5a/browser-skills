@@ -86,10 +86,10 @@ CDP_NEW_WINDOW_POLL_INTERVAL_S = 0.05
 # Patchright reports a popup once its first navigation commits, which a slow server
 # delays; past this, the next action's output announces it instead.
 POPUP_REPORT_TIMEOUT_S = 3.0
+POPUP_REPORT_POLL_INTERVAL_S = 0.05
 # A page's title comes from its renderer, which never answers while a script spins;
 # listings report such a page untitled rather than hang (issue #72).
 TITLE_READ_TIMEOUT_S = 1.0
-POPUP_REPORT_POLL_INTERVAL_S = 0.05
 # Linux v11 cookies require Chrome’s real OS password store/keychain, not Patchright automation defaults.
 PATCHRIGHT_INCOMPATIBLE_DEFAULT_ARGS = ("--password-store=basic", "--use-mock-keychain")
 # Chrome starts without a window: on macOS showing one activates Chrome and steals
@@ -315,8 +315,10 @@ class PatchrightRuntime:
                 return json.dumps({"backend": "patchright", "open": False, "thread": thread}) + "\n"
             return json.dumps({"backend": "patchright", "open": True, "thread": thread, **(await self._metadata(slot))}) + "\n"
         if name == "list":
+            # Not a page closed outside Surf, which stays remembered until its thread's
+            # next call but is no longer open (issue #74).
+            threads = sorted((key, slot) for key, slot in self.pages.items() if self._page_is_open(slot.page))
             # At once, so pages frozen together cost one title timeout, not one each.
-            threads = sorted(self.pages.items())
             metadata = await asyncio.gather(*(self._metadata(slot) for _, slot in threads))
             rows = [{"thread": key, **row} for (key, _), row in zip(threads, metadata)]
             return json.dumps({"backend": "patchright", "pages": rows}, sort_keys=True) + "\n"

@@ -14,7 +14,7 @@ Except `emit()`, methods return values without printing. Use explicit `print()` 
 
 ### `Thread(name='default')`
 
-Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline. Names you choose use letters, numbers, `.`, `-` and `_`. A popup or tab the thread's page opens, directly or through its popups, becomes a popup thread named `<name>/<n>`, numbered from 1 as the popups appear and never reused while the browser runs (it stops once every thread has closed); only Surf creates those.
+Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline. Names you choose use letters, numbers, `.`, `-` and `_`. A popup or tab the thread's page opens, directly or through its popups, becomes a popup thread named `<name>/<n>`, numbered from 1 as the popups appear and never reused while the browser runs (it stops once Chrome has no tab left, however they closed); only Surf creates those.
 
 Every method works on a popup thread while its page is open, and `open(url)` navigates the popup. Once the popup has closed, every method but `is_open()`, `close()` and `popups()` raises `page_closed`, as does a call in flight when it closes; the message names the thread's pages still open. A popup thread never reopens, since a new window would have lost `window.opener`.
 

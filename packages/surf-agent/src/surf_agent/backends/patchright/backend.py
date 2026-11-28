@@ -56,6 +56,24 @@ class PatchrightBridgeClient(LocalBridgeClient):
         # This sentinel is raised before the interrupted operation can complete.
         return super().call_tool(name, args, extra_timeout_s=extra_timeout_s)
 
+    def call_tool_if_running(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        on_request_may_have_been_dispatched: Callable[[], None] | None = None,
+    ) -> str | None:
+        try:
+            return super().call_tool_if_running(
+                name, args, on_request_may_have_been_dispatched=on_request_may_have_been_dispatched
+            )
+        except BridgeToolError as exc:
+            if exc.detail != CONTEXT_RESTART_REQUIRED:
+                raise
+        # A stopping bridge is no longer running: once it is gone, nothing it held is open.
+        self._wait_until_stopped()
+        return None
+
 
 class PatchrightBackend(LocalBridgeBackend):
     name = PATCHRIGHT_BACKEND

@@ -5,6 +5,7 @@ the Patchright objects, so calls on different Surf threads overlap without cross
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
@@ -50,6 +51,16 @@ def create_bridge_server(runtime: Any, port: int) -> uvicorn.Server:
         # Runs after the response is sent, so a final close or stop answers its caller first.
         if await runtime.finish_response(name):
             request_exit()
+
+    idle_checks: set[asyncio.Future[None]] = set()
+
+    def check_idle() -> None:
+        # No response follows a page closed outside a call, so nothing else would run finish.
+        task = asyncio.ensure_future(finish("idle"))
+        idle_checks.add(task)
+        task.add_done_callback(idle_checks.discard)
+
+    runtime.on_idle = check_idle
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:

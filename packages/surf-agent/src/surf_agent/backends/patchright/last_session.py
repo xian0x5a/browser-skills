@@ -2,10 +2,11 @@
 
 The Surf profile can inherit "Continue where you left off" from the signed-in Google
 account's synced settings. Chrome then restores the previous launch's tabs into the first
-window it opens: the window of the first thread Surf creates. Patchright does not expose
-those restored tabs as pages, so Surf never closes them, and each launch restores the
-previous launch's leftovers again. Surf threads never outlive a Chrome launch, so every
-restored tab is an orphan; removing the record leaves Chrome nothing to restore.
+window it opens: the window of the first thread Surf creates. Surf closes restored tabs
+once that window exists, but by then they may have loaded their pages: visits nobody
+asked for, Google searches included, which count toward Google's bot checks. Surf threads
+never outlive a Chrome launch, so every restored tab is an orphan; removing the record
+leaves Chrome nothing to restore.
 """
 
 from __future__ import annotations

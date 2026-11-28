@@ -345,7 +345,7 @@ class RuntimeTests(unittest.TestCase):
         context = FakeContext([dead])
         runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = context
-        runtime.pages["thread"] = patchright_bridge.PageSlot(page=dead, page_id=1)
+        runtime.pages["thread"] = patchright_bridge.PageSlot(page=dead, page_id=1, target_id="dead-target")
 
         self.assertEqual(
             runtime.call("open", {"thread": "thread", "url": "https://example.test/"}),
@@ -444,7 +444,7 @@ class RuntimeTests(unittest.TestCase):
         if "managed-target" in open_tabs:
             managed = FakePage("https://managed.test/", "managed-target")
             context.pages.append(managed)
-            runtime.pages["managed"] = patchright_bridge.PageSlot(page=managed, page_id=1)
+            runtime.pages["managed"] = patchright_bridge.PageSlot(page=managed, page_id=1, target_id="managed-target")
         return runtime, context
 
     def test_patchright_new_window_closes_tab_chrome_restored_outside_context_pages(self):
@@ -769,7 +769,7 @@ class RuntimeTests(unittest.TestCase):
         page = FakePage()
         runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = object()
-        runtime.pages["thread"] = PageSlot(page=page, page_id=1)
+        runtime.pages["thread"] = PageSlot(page=page, page_id=1, target_id="page-target")
 
         self.assertEqual(
             runtime.call("click", {"thread": "thread", "uid": "f1e2"}), "clicked\n"
@@ -807,7 +807,7 @@ class RuntimeTests(unittest.TestCase):
         runtime.browser_or_context = types.SimpleNamespace(
             pages=[page], new_page=None, new_cdp_session=lambda page: UnzoomedSession()
         )
-        runtime.pages["thread"] = patchright_bridge.PageSlot(page=page, page_id=1)
+        runtime.pages["thread"] = patchright_bridge.PageSlot(page=page, page_id=1, target_id="page-target")
 
         self.assertEqual(
             runtime.call(
@@ -848,7 +848,7 @@ class RuntimeTests(unittest.TestCase):
                 return '- button "[ref=e999]" [ref=e188]\n- paragraph [ref=e189]: Hello [ref=e777]'
 
         runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
-        slot = patchright_bridge.PageSlot(page=FakePage(), page_id=1)
+        slot = patchright_bridge.PageSlot(page=FakePage(), page_id=1, target_id="page-target")
 
         snapshot = runtime._run(runtime._snapshot(slot))
 
@@ -868,7 +868,7 @@ class RuntimeTests(unittest.TestCase):
 
         page = FakePage()
         runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
-        slot = patchright_bridge.PageSlot(page=page, page_id=1)
+        slot = patchright_bridge.PageSlot(page=page, page_id=1, target_id="page-target")
 
         with (
             patch.object(patchright_bridge, "SNAPSHOT_DEPTH", 4),
@@ -901,7 +901,7 @@ class RuntimeTests(unittest.TestCase):
         page = FakePage()
         runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime._run(
-            runtime._snapshot(patchright_bridge.PageSlot(page=page, page_id=1))
+            runtime._snapshot(patchright_bridge.PageSlot(page=page, page_id=1, target_id="page-target"))
         )
 
         self.assertEqual(
@@ -1175,7 +1175,7 @@ def test_snapshot_masks_an_input_value_whose_ref_the_browser_cannot_resolve() ->
 
     runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
     runtime.browser_or_context = object()
-    runtime.pages["thread"] = PageSlot(page=FakePage(), page_id=1)
+    runtime.pages["thread"] = PageSlot(page=FakePage(), page_id=1, target_id="page-target")
 
     snapshot = runtime.call("snapshot", {"thread": "thread"})
 

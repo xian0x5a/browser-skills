@@ -56,7 +56,7 @@ def snapshot_capture(text=None, **overrides):
 
 
 def answer_target_sweep(context, method, params):
-    """Answer the browser-level CDP calls of the unmanaged-tab sweep from context.pages."""
+    """Answer the browser-level CDP calls that list and close tabs from context.pages."""
     if method == "Target.getTargets":
         return {
             "targetInfos": [
@@ -260,19 +260,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(stops), 1)
         self.assertTrue(runtime.finish_response("open"))
         self.assertNotIn("thread", runtime.pages)
-        self.assertEqual(
-            closed_context.cdp_calls,
-            [
-                (
-                    "Target.createTarget",
-                    {
-                        "url": "about:blank",
-                        "newWindow": True,
-                        "background": True,
-                    },
-                )
-            ],
-        )
+        # The first call on the closed context fails, and the bridge does not retry it.
+        self.assertEqual(len(closed_context.cdp_calls), 1)
 
     def test_patchright_open_recreates_closed_target_without_double_navigation(self):
         class DeadPage:
@@ -372,9 +361,9 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
 
-    def test_patchright_new_window_closes_tab_chrome_restored_outside_context_pages(self):
-        # Chrome restores the last session's tabs into the first window it opens after
-        # having none; Patchright never lists them in context.pages.
+    def _chrome_with_open_tabs(self, open_tabs, *, restores_tab_into_new_window):
+        """Runtime over a fake Chrome whose CDP target list starts as open_tabs (target ids)."""
+
         class FakePage:
             def __init__(self, url, target_id):
                 self.url = url
@@ -408,8 +397,12 @@ class RuntimeTests(unittest.TestCase):
                     return {"success": True}
                 self.context.pages.append(FakePage(params["url"], target_id="new-target"))
                 self.context.targets["new-target"] = {"targetId": "new-target", "type": "page"}
-                # The restored tab shows up together with the new window, unlisted by Patchright.
-                self.context.targets["restored-tab"] = {"targetId": "restored-tab", "type": "page"}
+                if self.context.restores_tab_into_new_window:
+                    # Unlisted by Patchright, like every tab Chrome restores.
+                    self.context.targets["restored-tab"] = {
+                        "targetId": "restored-tab",
+                        "type": "page",
+                    }
                 return {"targetId": "new-target"}
 
             def detach(self):
@@ -417,13 +410,14 @@ class RuntimeTests(unittest.TestCase):
 
         class FakeContext:
             def __init__(self):
-                managed = FakePage("https://managed.test/", "managed-target")
-                self.pages = [managed]
+                self.pages = []
                 self.targets = {
-                    "managed-target": {"targetId": "managed-target", "type": "page"},
                     "browser-ui": {"targetId": "browser-ui", "type": "browser_ui"},
                     "prerender": {"targetId": "prerender", "type": "page", "subtype": "prerender"},
                 }
+                for target_id in open_tabs:
+                    self.targets[target_id] = {"targetId": target_id, "type": "page"}
+                self.restores_tab_into_new_window = restores_tab_into_new_window
                 self.closed_target_ids = []
                 self.browser = types.SimpleNamespace(
                     new_browser_cdp_session=lambda: FakeSession(self, None)
@@ -436,20 +430,39 @@ class RuntimeTests(unittest.TestCase):
                 return FakeSession(self, page)
 
         context = FakeContext()
-        managed = context.pages[0]
         runtime = SyncRuntime(PatchrightRuntime(profile_dir=Path("/tmp/surf-patchright-test")))
         runtime.browser_or_context = context
-        runtime.pages["managed"] = patchright_bridge.PageSlot(page=managed, page_id=1)
+        if "managed-target" in open_tabs:
+            managed = FakePage("https://managed.test/", "managed-target")
+            context.pages.append(managed)
+            runtime.pages["managed"] = patchright_bridge.PageSlot(page=managed, page_id=1)
+        return runtime, context
+
+    def test_patchright_new_window_closes_tab_chrome_restored_outside_context_pages(self):
+        # Chrome restores the last session's tabs into the first window it opens after
+        # having none; Patchright never lists them in context.pages.
+        runtime, context = self._chrome_with_open_tabs([], restores_tab_into_new_window=True)
 
         slot = runtime._run(runtime._new_page("thread", url="https://welcome.test/"))
 
         self.assertEqual(context.closed_target_ids, ["restored-tab"])
-        self.assertEqual(
-            set(context.targets), {"managed-target", "new-target", "browser-ui", "prerender"}
-        )
-        self.assertFalse(managed.closed)
+        self.assertEqual(set(context.targets), {"new-target", "browser-ui", "prerender"})
         self.assertFalse(slot.page.closed)
         self.assertEqual(slot.page.url, "https://welcome.test/")
+
+    def test_patchright_new_window_leaves_open_a_tab_a_thread_page_opened(self):
+        # A popup or target=_blank tab belongs to its thread; a new thread must not close it.
+        runtime, context = self._chrome_with_open_tabs(
+            ["managed-target", "popup-target"], restores_tab_into_new_window=False
+        )
+
+        runtime._run(runtime._new_page("thread", url="https://welcome.test/"))
+
+        self.assertEqual(context.closed_target_ids, [])
+        self.assertEqual(
+            set(context.targets),
+            {"managed-target", "popup-target", "new-target", "browser-ui", "prerender"},
+        )
 
     def test_patchright_runtime_open_snapshot_click_and_text(self):
         class FakeElement:

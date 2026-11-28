@@ -19,7 +19,7 @@ Weighted on meeting the requirement, simplicity of the end state, long-term fit,
 
 - Shared runtime state is guarded at await points rather than by serialization:
   - A per-Surf-thread lock keeps one thread's calls in order.
-  - A browser lock covers launch and window creation through registration, so one creation's unmanaged-tab sweep never closes another thread's window.
+  - A browser lock covers launch and window creation, so one creation's sweep of restored tabs never closes another thread's window.
   - Idle stop waits until no call is in flight.
 - Stop is one-way and runs once as a shared task. Calls arriving during a stop get `CONTEXT_RESTART_REQUIRED`, and the process exits only after the browser has stopped. The client then relaunches through its cross-process launch guard, which runs the cookie preflight.
 - **A call runs to completion even if its client disconnects.** Cancelling abandoned calls was tried and rejected: cancellation mid-launch, mid-window-creation or mid-stop stranded half-made state, and keeping every browser-wide operation cancellation-safe would be a permanent cost. A wedged call blocks only its own thread until `Browser().stop_bridge()`.

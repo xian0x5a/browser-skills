@@ -163,3 +163,25 @@ def test_closing_right_after_a_popup_opens_closes_the_popup(launch, site):  # no
         assert [t for t in popups_seen if t["type"] == "page" and t.get("openerId")], "Chrome never opened the popup"
         assert left == [], f"pages of the closed thread are still open in Chrome: {[t['url'] for t in left]}"
         assert runtime.finish_response("close") is True, f"bridge kept running; open pages: {open_urls(runtime)}"
+
+
+def test_a_popup_opened_while_the_thread_closes_closes_with_it(launch, site):  # noqa: F811
+    runtime = launch()
+    with fails_if_still_running_after(HUNG_AFTER_S, "popup opened while closing"):
+        runtime.call("open", {"thread": "racing", "url": f"{site}/opener.html"})
+        session = browser_session(runtime)
+        page = runtime.browser_or_context.pages[0]
+        real_close = page.close
+        popup_url = site.replace("127.0.0.1", "localhost") + "/busy.html?owner=racing"
+
+        async def open_popup_then_close(**kwargs):
+            # The page opens its popup just before it goes, after Surf has looked for the thread's popups.
+            await page.evaluate(OPEN_POPUP_CODE % popup_url)
+            await real_close(**kwargs)
+
+        page.close = open_popup_then_close
+        runtime.call("close", {"thread": "racing"})
+
+        left = page_targets(runtime, session)
+        assert left == [], f"pages of the closed thread are still open in Chrome: {[t['url'] for t in left]}"
+        assert runtime.finish_response("close") is True, f"bridge kept running; open pages: {open_urls(runtime)}"

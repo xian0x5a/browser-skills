@@ -175,9 +175,9 @@ Opens the dedicated profile for manual setup without automation/debugging. Tabs 
 
 The configured cookie source, if any.
 
-### `browser.set_cookie_source(source, profile, *, domains=(), all_domains=False) -> CookieSourceConfig`
+### `browser.set_cookie_source(source, profile, *, domains=(), all_domains=False, exclude_domains=(), exclude_google=True) -> CookieSourceConfig`
 
-Validates and persists an explicit access scope. Provide domains or all-domain consent, exclusively. Linux and macOS only.
+Validates and persists an explicit access scope. Provide domains or all-domain consent, exclusively. `exclude_domains` and, by default, Google sign-in hosts are never imported, since importing Google cookies [signs the source browser out](cookie-import.md#google-sign-in-is-never-imported-by-default). Linux and macOS only.
 
 ### `browser.reset_cookie_source() -> None`
 
@@ -189,7 +189,7 @@ Explicit refresh; the result has `imported_rows`, `skipped`, `destination`.
 
 ### `browser.import_cookies_for(domain) -> CookieImportResult`
 
-Adds one consented domain to the configured scope, stops the browser, and imports. Refuses, naming them, while any thread is open.
+Adds one consented domain to the configured scope, stops the browser, and imports. Refuses, naming them, while any thread is open, and refuses a domain the scope excludes.
 
 ### `browser.stop_bridge() -> None`
 

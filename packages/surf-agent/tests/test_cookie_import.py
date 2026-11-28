@@ -52,8 +52,9 @@ def rows(db: Path) -> list[tuple[str, str, str, str]]:
     return result
 
 
-def importer(tmp_path: Path, source_root: Path, destination: Path, *, domains: list[str] | None = None, all_domains: bool = False) -> CookieImporter:
-    scope = CookieScope.all() if all_domains else CookieScope.from_domains(domains or ["example.com"])
+def importer(tmp_path: Path, source_root: Path, destination: Path, *, domains: list[str] | None = None, all_domains: bool = False, exclude_domains: list[str] = (), exclude_google: bool = True) -> CookieImporter:
+    exclusions = {"exclude_domains": exclude_domains, "exclude_google": exclude_google}
+    scope = CookieScope.all(**exclusions) if all_domains else CookieScope.from_domains(domains or ["example.com"], **exclusions)
     config = resolve_cookie_source(source=source_root, profile="Default", scope=scope)
     return CookieImporter(config=config, destination_root=destination, state_root=tmp_path / "state", destination_family="chrome")
 
@@ -583,3 +584,71 @@ def test_local_state_publish_cleanup_preserves_concurrent_replacement(tmp_path: 
         _publish_new_local_state(path, {"encrypted_key": "source"})
 
     assert path.read_bytes() == replacement
+
+
+GOOGLE_FAMILY_HOSTS = [
+    "google.com", ".google.com", "accounts.google.com", "google.ca", "www.google.co.uk", ".google.com.au", "google.dev",
+    "youtube.com", ".youtube.com", "music.youtube.com",
+]
+GOOGLE_LOOKALIKE_HOSTS = ["notgoogle.com", "google.example.org", "myyoutube.com", "youtube.com.evil.net", "google.blogspot.com", ".example.com"]
+
+
+@pytest.mark.parametrize("host", GOOGLE_FAMILY_HOSTS)
+def test_google_sign_in_hosts_are_excluded_by_default(host: str) -> None:
+    assert not CookieScope.all().includes(host)
+
+
+@pytest.mark.parametrize("host", GOOGLE_LOOKALIKE_HOSTS)
+def test_google_lookalikes_and_ordinary_sites_stay_included(host: str) -> None:
+    assert CookieScope.all().includes(host)
+
+
+def test_google_exclusion_can_be_disabled() -> None:
+    scope = CookieScope.all(exclude_google=False)
+    assert all(scope.includes(host) for host in GOOGLE_FAMILY_HOSTS)
+
+
+@pytest.mark.parametrize(
+    "host,included",
+    [("example.com", False), (".example.com", False), ("api.example.com", False), ("badexample.com", True), ("example.com.evil.net", True)],
+)
+def test_user_exclusion_covers_domain_and_subdomains_not_lookalikes(host: str, included: bool) -> None:
+    assert CookieScope.all(exclude_domains=["example.com"]).includes(host) is included
+
+
+def test_all_domains_import_skips_google_and_user_excluded_cookies(tmp_path: Path) -> None:
+    source_root = tmp_path / "google-chrome"
+    source = make_profile(source_root)
+    for host in (".google.com", "accounts.google.co.uk", ".youtube.com", "google.blogspot.com", ".github.com", "secret.example.com"):
+        put(source, host, "session", "value")
+    destination = tmp_path / "destination"
+
+    importer(tmp_path, source_root, destination, all_domains=True, exclude_domains=["example.com"]).run(force=True)
+
+    assert [row[0] for row in rows(destination / "Default" / "Cookies")] == [".github.com", "google.blogspot.com"]
+
+
+@pytest.mark.parametrize(
+    "domains,exclusions",
+    [
+        (["google.ca"], {}),
+        (["accounts.google.com"], {}),
+        (["music.youtube.com"], {}),
+        (["a.example.com"], {"exclude_domains": ["example.com"]}),
+        (["example.com", "github.com"], {"exclude_domains": ["github.com"]}),
+    ],
+)
+def test_allowlist_entries_covered_by_exclusions_are_rejected(domains: list[str], exclusions: dict) -> None:
+    with pytest.raises(SurfAgentError):
+        CookieScope.from_domains(domains, **exclusions)
+
+
+def test_google_allowlist_is_accepted_and_imported_when_google_exclusion_is_off(tmp_path: Path) -> None:
+    source_root = tmp_path / "google-chrome"
+    source = make_profile(source_root)
+    put(source, ".google.ca", "pref", "value")
+    destination = tmp_path / "destination"
+
+    importer(tmp_path, source_root, destination, domains=["google.ca"], exclude_google=False).run(force=True)
+
+    assert rows(destination / "Default" / "Cookies") == [(".google.ca", "pref", "value", "")]

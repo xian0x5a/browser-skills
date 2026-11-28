@@ -104,7 +104,7 @@ The open popup threads of this thread, oldest first; on a popup thread, those of
 
 ### `thread.close() -> None`
 
-Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure. On a popup thread, closes that popup and the popups it opened.
+Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure. With no bridge running there is nothing to close, and it starts none. On a popup thread, closes that popup and the popups it opened.
 
 ## Snapshot output
 

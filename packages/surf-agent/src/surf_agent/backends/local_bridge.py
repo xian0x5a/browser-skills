@@ -260,11 +260,10 @@ class LocalBridgeBackend:
         return isinstance(data, dict) and data.get("open") is True
 
     def close(self) -> int:
-        self.close_page()
+        # Not call_tool, which would start a bridge: a bridge that is not running holds no
+        # pages, so there is nothing to close (issue #79).
+        self.client.call_tool_if_running("close", self._thread_args(None))
         return 0
-
-    def close_page(self) -> str:
-        return self._call("close")
 
     def focus(self) -> int:
         self._call("focus")

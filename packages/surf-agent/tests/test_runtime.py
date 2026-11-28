@@ -147,6 +147,9 @@ class RuntimeTests(unittest.TestCase):
         # A windowless launch has no page to anchor a CDP session; opening one would
         # show a foreground window and steal focus.
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -281,6 +284,9 @@ class RuntimeTests(unittest.TestCase):
                 raise RuntimeError(patchright_bridge.CLOSED_TARGET_MESSAGE)
 
         class CreatedPage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -365,6 +371,9 @@ class RuntimeTests(unittest.TestCase):
         """Runtime over a fake Chrome whose CDP target list starts as open_tabs (target ids)."""
 
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url, target_id):
                 self.url = url
                 self.target_id = target_id
@@ -525,6 +534,9 @@ class RuntimeTests(unittest.TestCase):
                 return "Body text"
 
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id

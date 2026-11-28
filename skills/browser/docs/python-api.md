@@ -98,7 +98,7 @@ Brings the remembered page forward.
 
 ### `thread.close() -> None`
 
-Closes the managed page and clears the emission baseline; raises on bridge failure.
+Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure.
 
 ## Snapshot output
 
@@ -201,7 +201,7 @@ Stops the automation bridge and its Chrome.
 
 ### `browser.close_matching(pattern) -> None`
 
-Closes remembered pages whose thread names match the glob.
+Closes remembered pages whose thread names match the glob, with the popups and tabs they opened.
 
 ## Errors
 

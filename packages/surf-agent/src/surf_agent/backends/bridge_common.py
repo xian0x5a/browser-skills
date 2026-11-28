@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,8 @@ class BridgeCodedError(RuntimeError):
 class PageSlot:
     page: Any
     page_id: int
+    # Pages the thread's page opened, and the ones those opened in turn.
+    popups: list[Any] = field(default_factory=list)
 
 
 

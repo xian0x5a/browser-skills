@@ -273,7 +273,7 @@ class PatchrightRuntime:
         if name == "close":
             old = self.pages.pop(thread, None)
             if old:
-                await self._maybe_await(old.page.close())
+                await self._close_thread_pages(old)
             # The HTTP handler arms this only after its success response is written.
             self._close_shutdown_pending = True
             return "closed\n"
@@ -292,7 +292,7 @@ class PatchrightRuntime:
                         continue
                     item = {"thread": managed_thread, "page_id": slot.page_id}
                     try:
-                        await self._maybe_await(slot.page.close())
+                        await self._close_thread_pages(slot)
                     except Exception:
                         result["failed"].append(item)
                     else:
@@ -494,8 +494,8 @@ class PatchrightRuntime:
     async def _new_page(self, thread: str, url: str | None = None) -> PageSlot:
         self._cancel_shutdown_request()
         old = self.pages.pop(thread, None)
-        if old and self._page_is_open(old.page):
-            await self._maybe_await(old.page.close())
+        if old:
+            await self._close_thread_pages(old)
         async with self._browser_lock:
             self._raise_if_stopping()
             try:
@@ -509,6 +509,7 @@ class PatchrightRuntime:
             slot = PageSlot(page=page, page_id=self._next_page_id)
             self._next_page_id += 1
             self.pages[thread] = slot
+            self._adopt_popups(slot, page)
         if url and url != BLANK_PAGE_URL:
             # Navigate here rather than handing the URL to Target.createTarget: the target
             # appears before that navigation commits, so the page came back without its URL
@@ -516,6 +517,26 @@ class PatchrightRuntime:
             await self._maybe_await(page.goto(url, wait_until="domcontentloaded"))
             await self._forget_blank_history_entry(page)
         return slot
+
+    def _adopt_popups(self, slot: PageSlot, opener: Any) -> None:
+        # A thread owns the popups and tabs its page opens, and the ones those open in
+        # turn, so they close with the thread. Left open, a popup would also keep the
+        # bridge from stopping after the last thread closes (_is_busy counts every page).
+        # Patchright reports a popup only once it has set the page up, and not at all if
+        # the opener closed first, so a popup opened just before its thread closes, as by a
+        # click right before close, can still outlive it.
+        def adopt(popup: Any) -> None:
+            slot.popups = [page for page in slot.popups if self._page_is_open(page)] + [popup]
+            self._adopt_popups(slot, popup)
+
+        opener.on("popup", adopt)
+
+    async def _close_thread_pages(self, slot: PageSlot) -> None:
+        # Popups go even when the thread's page already closed, as when a human closed it.
+        # Repeat until none is open: a popup can open another while the first ones close.
+        while open_pages := [page for page in [slot.page, *slot.popups] if self._page_is_open(page)]:
+            for page in open_pages:
+                await self._maybe_await(page.close())
 
     async def _forget_blank_history_entry(self, page: Any) -> None:
         # The window commits about:blank before its first page, so back() would return

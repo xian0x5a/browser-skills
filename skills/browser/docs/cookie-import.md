@@ -31,6 +31,16 @@ browser.set_cookie_source(
 
 Use `all_domains=True` instead of `domains` only for explicit broader consent. The source path names Chrome's user-data directory; the second argument names its profile.
 
+`exclude_domains=[...]` names domains whose cookies are never imported, including their subdomains, with either scope form. An allowlisted domain that an exclusion covers in full is rejected.
+
+## Google sign-in is never imported by default
+
+Every scope excludes Google's sign-in hosts: `google.<any suffix>` (google.com, google.ca, google.co.uk, ...) and `youtube.com`, with their subdomains. Importing them forks one Google session into two Chromes, and the source browser gets signed out of Google, on every Google site, right after Surf starts; YouTube reports "Your Google Account was signed out on a different tab". The likely cause is Surf's Chrome reconciling its own signed-in accounts against the copied cookies, or both browsers rotating the same session token. For Google in Surf, have the user sign in inside the Surf window instead ([human unblock](../SKILL.md#login-and-human-unblock)).
+
+The exclusion applies to allowlists too, because an imported `google.com` forks the session exactly like an all-domain import. So `set_cookie_source(..., domains=["google.com"])` and `import_cookies_for("google.com")` fail rather than import nothing. Pass `exclude_google=False` only when the user accepts being signed out of Google in their normal Chrome.
+
+Excluding a domain stops future imports only; cookies imported earlier stay in Surf. To clear Google cookies imported before, delete their rows from Surf's `Cookies` database while Surf's Chrome is stopped. Do not sign out of Google inside Surf: the copied session is the source browser's, so signing out ends it there too.
+
 ## Import for one site
 
 Use when a login wall blocks the task and the user's normal Chrome is already signed in. Ask first, naming the domain: "Import your Chrome cookies for github.com into Surf?" Proceed only on a yes. If the user is not signed in there, ask them to log in inside the Surf window instead ([human unblock](../SKILL.md#login-and-human-unblock)); no import is needed.

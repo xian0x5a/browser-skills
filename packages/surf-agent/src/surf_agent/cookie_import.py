@@ -517,14 +517,7 @@ def should_import(host_key: Any, expires_utc: Any, config: CookieSourceConfig, n
     # An expired source row would otherwise overwrite a still-valid Surf cookie
     # with the same identity. Zero is a session cookie, which never expires.
     expired = bool(expires_utc) and int(expires_utc) <= now
-    return scope_matches(str(host_key or ""), config) and not expired
-
-
-def scope_matches(host_key: str, config: CookieSourceConfig) -> bool:
-    if config.scope.all_domains:
-        return True
-    host = host_key.lstrip(".").lower().rstrip(".")
-    return any(host == domain or host.endswith(f".{domain}") for domain in config.scope.domains)
+    return config.scope.includes(str(host_key or "")) and not expired
 
 
 def identifier(value: str) -> str:

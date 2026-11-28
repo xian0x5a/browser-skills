@@ -36,6 +36,6 @@ _Avoid_: Step, script, command
 
 **Cookie source** — The explicitly configured normal browser profile from which Surf imports cookies.
 
-**Cookie scope** — The set of website domains whose cookies a cookie import may expose to Surf. A scope is either an explicit domain allowlist or explicit all-domain consent.
+**Cookie scope** — The set of website domains whose cookies a cookie import may expose to Surf. A scope is either an explicit domain allowlist or explicit all-domain consent, minus excluded domains. Google sign-in domains are excluded unless the scope opts out.
 
 **User-visible page** — A normal browser tab or window that may contain user work, whether or not Surf remembers it as a managed thread. Background targets and extension workers are not user-visible pages.

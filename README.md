@@ -62,7 +62,8 @@ To set up cookie import yourself, add `cookie_source` to Surf's `config.json` (`
 
 - `root` is the absolute path of Chrome's user-data directory (`/Users/you/Library/Application Support/Google/Chrome` on macOS); `profile` names a profile inside it.
 - `family` is `chrome`, `chromium`, `brave` or `edge`, and must match Surf's browser.
-- `scope` holds either a domain list or `{"all_domains": true}`, not both.
+- `scope` holds either a domain list or `{"all_domains": true}`, not both. `"exclude_domains": [...]` keeps domains and their subdomains out of either form.
+- Google sign-in cookies (`google.<any suffix>`, `youtube.com`) are never imported unless the scope sets `"exclude_google": false`: importing them signs your normal Chrome out of Google ([why](skills/browser/docs/cookie-import.md#google-sign-in-is-never-imported-by-default)).
 
 ## Window rules
 

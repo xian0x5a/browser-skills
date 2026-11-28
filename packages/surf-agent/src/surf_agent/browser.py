@@ -66,15 +66,18 @@ class Browser:
         *,
         domains: Sequence[str] = (),
         all_domains: bool = False,
+        exclude_domains: Sequence[str] = (),
+        exclude_google: bool = True,
     ) -> CookieSourceConfig:
         if all_domains == bool(domains):
             raise SurfAgentError("provide domains or all_domains, exclusively")
         if not supports_live_cookie_import():
             raise SurfAgentError(UNSUPPORTED_PLATFORM_MESSAGE)
+        exclusions = {"exclude_domains": exclude_domains, "exclude_google": exclude_google}
         scope = (
-            config.CookieScope.all()
+            config.CookieScope.all(**exclusions)
             if all_domains
-            else config.CookieScope.from_domains(domains)
+            else config.CookieScope.from_domains(domains, **exclusions)
         )
         value = config.resolve_cookie_source(
             source=source, profile=profile, scope=scope
@@ -107,6 +110,8 @@ class Browser:
             raise SurfAgentError(
                 "no cookie source is configured; ask the user for their Chrome profile, then call Browser.set_cookie_source"
             )
+        (requested_domain,) = config.normalize_domains([domain])
+        source.scope.require_not_excluded([requested_domain])
         open_threads = sorted(thread.name for thread in self.threads())
         if open_threads:
             raise SurfAgentError(
@@ -114,8 +119,16 @@ class Browser:
                 + ", ".join(open_threads)
             )
         if not source.scope.all_domains:
+            # A stored allowlist may predate an exclusion that now covers some of
+            # its entries (e.g. google.com); those import nothing, and re-saving
+            # them would be rejected, so they are dropped here.
+            kept_domains = [d for d in source.scope.domains if not source.scope.excludes(d)]
             self.set_cookie_source(
-                str(source.root), source.profile, domains=[*source.scope.domains, domain]
+                str(source.root),
+                source.profile,
+                domains=[*kept_domains, requested_domain],
+                exclude_domains=source.scope.exclude_domains,
+                exclude_google=source.scope.exclude_google,
             )
         self.stop_bridge()
         return self.import_cookies()

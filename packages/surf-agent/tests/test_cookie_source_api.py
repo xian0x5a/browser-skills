@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from surf_agent.config import CookieSourceConfig
 from surf_agent import Browser, SurfAgentError
 
 
@@ -112,11 +113,12 @@ def test_explicit_import_delegates_to_agent_lifecycle(
     assert agent.force_calls == 1
 
 
-def configure_domain_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, all_domains: bool = False) -> Path:
+def configure_domain_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, all_domains: bool = False, **exclusions: object) -> Path:
     config = tmp_path / "config.json"
     source = tmp_path / "google-chrome"
     make_source(source)
     scope = {"all_domains": True, "domains": []} if all_domains else {"all_domains": False, "domains": ["example.com"]}
+    scope.update(exclusions)
     config.write_text(
         json.dumps(
             {
@@ -206,3 +208,82 @@ def test_import_cookies_for_requires_configured_source(
 
     with pytest.raises(SurfAgentError, match="set_cookie_source"):
         Browser().import_cookies_for("github.com")
+
+
+@pytest.mark.parametrize(
+    "stored_scope",
+    [
+        {"all_domains": True, "domains": []},
+        # A pre-feature allowlist naming Google must still load: raising here would break every Surf action.
+        {"all_domains": False, "domains": ["github.com", "google.com"]},
+    ],
+)
+def test_legacy_stored_scope_loads_with_google_exclusion_on(stored_scope: dict) -> None:
+    legacy = {"root": "/src", "profile": "Default", "family": "chrome", "scope": stored_scope}
+
+    scope = CookieSourceConfig.from_json(legacy).scope
+
+    assert scope.exclude_google is True
+    assert scope.exclude_domains == ()
+    assert not scope.includes(".google.com")
+    assert scope.includes(".github.com")
+
+
+def test_set_cookie_source_persists_exclusions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / "config.json"
+    source = tmp_path / "google-chrome"
+    make_source(source)
+    monkeypatch.setattr("surf_agent.runtime.config_file", lambda: config)
+    monkeypatch.setenv("SURF_AGENT_CHROME_BIN", "google-chrome")
+
+    Browser().set_cookie_source(str(source), "Default", all_domains=True, exclude_domains=["Bank.com"], exclude_google=False)
+
+    scope = json.loads(config.read_text())["cookie_source"]["scope"]
+    assert scope["exclude_domains"] == ["bank.com"]
+    assert scope["exclude_google"] is False
+
+
+@pytest.mark.parametrize("all_domains", [False, True])
+def test_import_cookies_for_refuses_excluded_domain_before_touching_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, all_domains: bool
+) -> None:
+    config = configure_domain_scope(tmp_path, monkeypatch, all_domains=all_domains, exclude_domains=["bank.com"])
+    before = config.read_text()
+
+    def must_not_construct(**_kwargs: object) -> None:
+        raise AssertionError("agent constructed")
+
+    monkeypatch.setattr("surf_agent.browser.SurfAgent", must_not_construct)
+
+    for domain in ("Accounts.Bank.com", "Accounts.Google.com"):
+        with pytest.raises(SurfAgentError):
+            Browser().import_cookies_for(domain)
+    assert config.read_text() == before
+
+
+def test_import_cookies_for_keeps_exclusions_when_extending_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configure_domain_scope(tmp_path, monkeypatch, exclude_domains=["bank.com"], exclude_google=True)
+    agent = DomainImportAgent(threads=[])
+    monkeypatch.setattr("surf_agent.browser.SurfAgent", lambda **_kwargs: agent)
+
+    Browser().import_cookies_for("github.com")
+
+    scope = json.loads(config.read_text())["cookie_source"]["scope"]
+    assert scope["domains"] == ["example.com", "github.com"]
+    assert scope["exclude_domains"] == ["bank.com"]
+    assert scope["exclude_google"] is True
+
+
+def test_import_cookies_for_resaves_legacy_google_allowlist_without_excluded_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configure_domain_scope(tmp_path, monkeypatch, domains=["github.com", "google.com"])
+    agent = DomainImportAgent(threads=[])
+    monkeypatch.setattr("surf_agent.browser.SurfAgent", lambda **_kwargs: agent)
+
+    Browser().import_cookies_for("example.org")
+
+    scope = json.loads(config.read_text())["cookie_source"]["scope"]
+    assert scope["domains"] == ["example.org", "github.com"]

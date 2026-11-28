@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,37 +17,110 @@ from .errors import SurfAgentError
 # Use tldextract's packaged Public Suffix List snapshot.  Disabling network fetches
 # keeps command behavior deterministic and avoids exposing configured domains.
 _PSL = tldextract.TLDExtract(suffix_list_urls=())
+
+
+# Google's web sign-in is one server-side session shared by every Google site.
+# Copying its cookies into a second Chrome forks that session, and the source
+# browser was observed to be signed out right after Surf started (likely the
+# copy's account reconciliation or token rotation changing the shared session).
+# Google sign-in cookies live on google.<suffix> (google.com, google.ca,
+# google.co.uk, ...) and youtube.com.
+_GOOGLE_SESSION_LABEL = "google"
+_GOOGLE_SESSION_DOMAINS = ("youtube.com",)
+
+
 @dataclass(frozen=True)
 class CookieScope:
     domains: tuple[str, ...] = ()
     all_domains: bool = False
+    exclude_domains: tuple[str, ...] = ()
+    exclude_google: bool = True
+
+    def require_not_excluded(self, domains: Iterable[str]) -> None:
+        """Reject requested domains the exclusions cover in full, which would import nothing.
+
+        Only for domains being requested now: a stored allowlist that names a
+        Google domain from before the exclusion must still load, and imports
+        nothing there.
+        """
+        covered = [domain for domain in domains if self.excludes(domain)]
+        if not covered:
+            return
+        hint = (
+            "; Google sign-in cookies are excluded by default because importing them signs the source browser out of Google,"
+            " pass exclude_google=False only with the user's consent to that"
+            if self.exclude_google and any(is_google_session_host(domain) for domain in covered)
+            else ""
+        )
+        raise SurfAgentError(f"cookie domains are excluded from the scope: {', '.join(covered)}{hint}", exit_code=2)
 
     @classmethod
-    def from_domains(cls, values: Iterable[str]) -> "CookieScope":
+    def from_domains(cls, values: Iterable[str], *, exclude_domains: Iterable[str] = (), exclude_google: bool = True) -> "CookieScope":
         domains = normalize_domains(values)
         if not domains:
             raise SurfAgentError("cookie source requires domains or all_domains", exit_code=2)
-        return cls(domains=domains)
+        scope = cls(domains=domains, exclude_domains=normalize_domains(exclude_domains), exclude_google=exclude_google)
+        scope.require_not_excluded(domains)
+        return scope
 
     @classmethod
-    def all(cls) -> "CookieScope":
-        return cls(all_domains=True)
+    def all(cls, *, exclude_domains: Iterable[str] = (), exclude_google: bool = True) -> "CookieScope":
+        return cls(all_domains=True, exclude_domains=normalize_domains(exclude_domains), exclude_google=exclude_google)
+
+    def includes(self, host: str) -> bool:
+        """Whether a cookie for `host` (a Chrome host_key) may be imported."""
+        host = normalize_host(host)
+        allowed = self.all_domains or any(_within(host, domain) for domain in self.domains)
+        return allowed and not self.excludes(host)
+
+    def excludes(self, host: str) -> bool:
+        host = normalize_host(host)
+        return any(_within(host, domain) for domain in self.exclude_domains) or (self.exclude_google and is_google_session_host(host))
 
     def to_json(self) -> dict[str, Any]:
-        return {"all_domains": self.all_domains, "domains": list(self.domains)}
+        return {
+            "all_domains": self.all_domains,
+            "domains": list(self.domains),
+            "exclude_domains": list(self.exclude_domains),
+            "exclude_google": self.exclude_google,
+        }
 
     @classmethod
     def from_json(cls, value: Any) -> "CookieScope":
         if not isinstance(value, dict):
             raise SurfAgentError("cookie source scope must be an object")
         all_domains = value.get("all_domains") is True
-        domains_value = value.get("domains", [])
-        if not isinstance(domains_value, list) or not all(isinstance(item, str) for item in domains_value):
-            raise SurfAgentError("cookie source domains must be a list of strings")
-        domains = normalize_domains(domains_value)
+        domains = _domain_list(value, "domains")
         if all_domains == bool(domains):
             raise SurfAgentError("cookie source scope must contain exactly one of domains or all-domains")
-        return cls(domains=domains, all_domains=all_domains)
+        exclude_google = value.get("exclude_google", True)
+        if not isinstance(exclude_google, bool):
+            raise SurfAgentError("cookie source exclude_google must be true or false")
+        return cls(domains=domains, all_domains=all_domains, exclude_domains=_domain_list(value, "exclude_domains"), exclude_google=exclude_google)
+
+
+def _domain_list(value: dict[str, Any], key: str) -> tuple[str, ...]:
+    items = value.get(key, [])
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise SurfAgentError(f"cookie source {key} must be a list of strings")
+    return normalize_domains(items)
+
+
+def normalize_host(host_key: str) -> str:
+    return host_key.lstrip(".").lower().rstrip(".")
+
+
+def _within(host: str, domain: str) -> bool:
+    return host == domain or host.endswith(f".{domain}")
+
+
+@lru_cache(maxsize=4096)
+def is_google_session_host(host: str) -> bool:
+    """Whether `host` is google.<public suffix>, youtube.com, or a subdomain of either."""
+    host = normalize_host(host)
+    # ICANN suffixes only (tldextract's default), so a private-suffix site such as
+    # google.blogspot.com stays an ordinary third-party host.
+    return _PSL(host).domain == _GOOGLE_SESSION_LABEL or any(_within(host, domain) for domain in _GOOGLE_SESSION_DOMAINS)
 
 
 @dataclass(frozen=True)

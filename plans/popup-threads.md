@@ -1,5 +1,5 @@
 ---
-status: open
+status: done
 ---
 
 # Popup threads (issue #71)
@@ -37,7 +37,7 @@ A thread reaches only its own page today. Probe (headless, local pages): after `
 ## Work plan
 
 1. Layer 1, end to end: registration, naming, announcements in action output, `popups()`, fail-closed popup threads, closing a popup thread, name validation, docs. Acceptance: the live sign-in flow below.
-2. Layer 2: `rename-thread` moving popup threads, `browser.threads()` showing each popup thread's root, and anything layer 1's review surfaces.
+2. Layer 2, dropped: `rename-thread` moving popup threads, and `browser.threads()` showing each popup thread's root.
 
 ## Validation
 
@@ -71,8 +71,9 @@ A thread reaches only its own page today. Probe (headless, local pages): after `
 - Flat numbering per root, never reused: a closed `app/1` must keep failing even after newer popups open (Codex's IAB uses never-reused IDs too).
 - `focus` is not an action output: `Thread.focus()` returns nothing, so announcements flushed into it would be lost, and focusing a window opens no popup.
 - Closing a thread does not wait for calls in flight on its popup threads: a popup can close itself at any moment, so callers of a popup thread handle `page_closed` anyway, and such a call fails with the family's open threads.
+- Layer 2 dropped (2026-11-27): a popup thread's name already carries its root, and `rename-thread` refuses a thread with open popup threads with a clear error; no agent need for renaming one was found.
 - No per-turn cleanup like Codex's (agent-created tabs closed at turn end): Surf closes popups with their thread, and Surf has no notion of a turn.
 
 ## Outcomes & Retrospective
 
-Layer 1 is in place: popup threads are adopted through Chrome's recorded openers, announced in action output, listed by `popups()`, fail closed, and close with their thread. The first design, on Patchright's `popup` event, passed its acceptance tests but lost popups whose opener had closed and left announcements pointing at closed popups. Two independent reviews found what the acceptance tests did not; the lesson is that ownership needs one source of truth, here Chrome's openers, with Patchright supplying only the page objects. Layer 2 (rename moving popup threads, `browser.threads()` showing roots) is still open.
+Layer 1 is in place: popup threads are adopted through Chrome's recorded openers, announced in action output, listed by `popups()`, fail closed, and close with their thread. The first design, on Patchright's `popup` event, passed its acceptance tests but lost popups whose opener had closed and left announcements pointing at closed popups. Two independent reviews found what the acceptance tests did not; the lesson is that ownership needs one source of truth, here Chrome's openers, with Patchright supplying only the page objects. Layer 1 shipped in #76; layer 2 was dropped (see Decisions), and #71 is closed.

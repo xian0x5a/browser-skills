@@ -158,7 +158,7 @@ def runtime(tmp_path):
 def register_page(runtime: PatchrightRuntime, thread: str) -> FakePage:
     page = FakePage(f"existing-{thread}")
     runtime.browser_or_context.pages.append(page)
-    runtime.pages[thread] = PageSlot(page=page, page_id=len(runtime.pages) + 100)
+    runtime.pages[thread] = PageSlot(page=page, page_id=len(runtime.pages) + 100, target_id=f"{thread}-target")
     return page
 
 

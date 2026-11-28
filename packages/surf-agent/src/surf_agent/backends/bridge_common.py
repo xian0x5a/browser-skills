@@ -28,6 +28,8 @@ class BridgeCodedError(RuntimeError):
 class PageSlot:
     page: Any
     page_id: int
+    # The page's CDP target, which Chrome names as the opener of the page's popups.
+    target_id: str
     # Pages the thread's page opened, and the ones those opened in turn.
     popups: list[Any] = field(default_factory=list)
 

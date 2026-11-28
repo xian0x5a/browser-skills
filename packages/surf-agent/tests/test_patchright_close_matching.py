@@ -37,9 +37,24 @@ class Page:
         return self.closed
 
 
+class NoTabsSession:
+    """A browser CDP session over the fake pages, which Chrome would not list as tabs."""
+
+    def send(self, method, params=None):
+        assert method == "Target.getTargets", method
+        return {"targetInfos": []}
+
+    def detach(self) -> None:
+        pass
+
+
 class Context:
     def __init__(self, pages: list[Page]) -> None:
         self.pages = pages
+        self.browser = SimpleNamespace(new_browser_cdp_session=NoTabsSession)
+
+    def new_page(self):
+        raise AssertionError("closing a thread must not open a page")
 
 
 class BridgeClient:
@@ -83,9 +98,10 @@ def health_response(payload: dict[str, object]) -> MagicMock:
 def runtime_with_pages(tmp_path: Path, pages: dict[str, tuple[Page, int]]) -> PatchrightRuntime:
     runtime = SyncRuntime(PatchrightRuntime(profile_dir=tmp_path / "profile"))
     runtime.pages = {
-        thread: PageSlot(page=page, page_id=page_id)
+        thread: PageSlot(page=page, page_id=page_id, target_id=f"target-{page_id}")
         for thread, (page, page_id) in pages.items()
     }
+    runtime.browser_or_context = Context([page for page, _page_id in pages.values()])
     return runtime
 
 

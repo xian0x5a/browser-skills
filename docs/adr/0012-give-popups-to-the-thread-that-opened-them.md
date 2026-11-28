@@ -4,7 +4,7 @@ status: accepted
 
 # Give popups to the thread that opened them
 
-A popup that a thread's page opens, directly or through its own popups, becomes a popup thread of that thread. It is named `<thread>/<n>` in the order the popups open, and a number is never reused. The action that opened it announces it, and `thread.popups()` lists the open ones. No handle ever moves to another page. A popup thread whose page closed fails with `page_closed` and is never reopened, and closing a thread closes its popup threads. Before this, a thread reached only its own page, so OAuth sign-in and 3-D Secure popups, which hand their result back through `window.opener`, could not be completed; opening the popup's URL in a thread of its own loses that opener.
+A popup that a thread's page opens, directly or through its own popups, becomes a popup thread of that thread. It is named `<thread>/<n>`, numbered as the popups appear, and a number is never reused. The action that opened it announces it, and `thread.popups()` lists the open ones. No handle ever moves to another page. A popup thread whose page closed fails with `page_closed` and is never reopened, and closing a thread closes its popup threads. Before this, a thread reached only its own page, so OAuth sign-in and 3-D Secure popups, which hand their result back through `window.opener`, could not be completed; opening the popup's URL in a thread of its own loses that opener.
 
 The deciding reason is how agents run Surf: several actions per Python cell, with the output read only once the cell ends. A thread that followed new pages would move the rest of a cell onto a page the script did not choose, and the notice of the switch would arrive after the damage.
 

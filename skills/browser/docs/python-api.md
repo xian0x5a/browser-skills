@@ -14,9 +14,9 @@ Except `emit()`, methods return values without printing. Use explicit `print()` 
 
 ### `Thread(name='default')`
 
-Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline. Names you choose use letters, numbers, `.`, `-` and `_`. A popup or tab the thread's page opens, directly or through its popups, becomes a popup thread named `<name>/<n>`, numbered in opening order and never reused while the browser runs (it stops once every thread has closed); only Surf creates those.
+Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline. Names you choose use letters, numbers, `.`, `-` and `_`. A popup or tab the thread's page opens, directly or through its popups, becomes a popup thread named `<name>/<n>`, numbered from 1 as the popups appear and never reused while the browser runs (it stops once every thread has closed); only Surf creates those.
 
-Every method works on a popup thread while its page is open, and `open(url)` navigates the popup. Once the popup has closed, every method but `is_open()` and `close()` raises `page_closed`, as does a call in flight when it closes; the message names the thread's pages still open. A popup thread never reopens, since a new window would have lost `window.opener`.
+Every method works on a popup thread while its page is open, and `open(url)` navigates the popup. Once the popup has closed, every method but `is_open()`, `close()` and `popups()` raises `page_closed`, as does a call in flight when it closes; the message names the thread's pages still open. A popup thread never reopens, since a new window would have lost `window.opener`.
 
 ### `thread.open(url) -> str`
 
@@ -100,7 +100,7 @@ Brings the remembered page forward.
 
 ### `thread.popups() -> list[Thread]`
 
-The open popup threads of this thread, oldest first; on a popup thread, those of the thread it belongs to. An action whose output reports it opened a popup, as `opened popup Thread("<name>/<n>"): <url>`, has already added it here. A popup whose page takes over 3 s to start loading is added, and announced, during a later action instead.
+The open popup threads of this thread, oldest first; on a popup thread, those of the thread it belongs to. An action whose output reports it opened a popup, as `opened popup Thread("<name>/<n>"): <url>`, has already added it here. A popup whose page takes over 3 s to start loading is added once it does, and a later action announces it. A tab that never loads a page, such as one answered `204 No Content`, never becomes a popup thread and closes with its thread.
 
 ### `thread.close() -> None`
 

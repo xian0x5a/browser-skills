@@ -23,6 +23,7 @@ from .last_session import forget_last_session
 from .network_capture import NetworkCapture
 from .saved_zoom import clear_saved_zoom
 from .server import create_bridge_server
+from .tabs import PopupTracker, close_tab, list_tabs
 from ..bridge_common import (
     CLOSED_TARGET_MESSAGE,
     NATIVE_ARIA_REF_PATTERN,
@@ -82,9 +83,6 @@ HIT_TEST_BLOCKER_JS = """element => {
 }"""
 CDP_NEW_WINDOW_TIMEOUT_S = 3.0
 CDP_NEW_WINDOW_POLL_INTERVAL_S = 0.05
-# A closed popup is gone once its unload handlers ran; past this, it is left to finish.
-POPUP_CLOSE_TIMEOUT_S = 5.0
-POPUP_CLOSE_POLL_INTERVAL_S = 0.05
 # Linux v11 cookies require Chrome’s real OS password store/keychain, not Patchright automation defaults.
 PATCHRIGHT_INCOMPATIBLE_DEFAULT_ARGS = ("--password-store=basic", "--use-mock-keychain")
 # Chrome starts without a window: on macOS showing one activates Chrome and steals
@@ -95,8 +93,6 @@ BLANK_PAGE_URL = "about:blank"
 COMMANDS_WITHOUT_THREAD_LOCK = frozenset({"list", "state", "close-matching", "rename-thread"})
 # Chrome's Page.resetNavigationHistory error while a back/forward navigation is pending.
 HISTORY_NAVIGATION_PENDING_MESSAGE = "History cannot be pruned"
-# CDP's answer to Target.closeTarget for a target that no longer exists.
-MISSING_TARGET_MESSAGE = "No target with given id found"
 # The windowless launch relies on Patchright skipping its first-page wait; if a
 # Patchright release stops skipping it, fail after this instead of hanging.
 LAUNCH_TIMEOUT_MS = 30_000
@@ -121,6 +117,8 @@ class PatchrightRuntime:
         self.browser_or_context: Any | None = None
         self.pages: dict[str, PageSlot] = {}
         self.network = NetworkCapture()
+        # Never reset: a runtime launches at most one browser (see _stopping below).
+        self._popups = PopupTracker(lambda: self._context().browser.new_browser_cdp_session())
         self._next_page_id = 1
         self.shutdown_requested = False
         self._close_shutdown_pending = False
@@ -502,6 +500,8 @@ class PatchrightRuntime:
         async with self._browser_lock:
             self._raise_if_stopping()
             try:
+                # Before the window exists, so every tab it opens is recorded as its own.
+                await self._popups.watch()
                 page, target_id = await self._create_new_window_page()
             except Exception as exc:
                 if not self._is_closed_target_error(exc):
@@ -512,7 +512,6 @@ class PatchrightRuntime:
             slot = PageSlot(page=page, page_id=self._next_page_id, target_id=target_id)
             self._next_page_id += 1
             self.pages[thread] = slot
-            self._adopt_popups(slot, page)
         if url and url != BLANK_PAGE_URL:
             # Navigate here rather than handing the URL to Target.createTarget: the target
             # appears before that navigation commits, so the page came back without its URL
@@ -521,70 +520,12 @@ class PatchrightRuntime:
             await self._forget_blank_history_entry(page)
         return slot
 
-    def _adopt_popups(self, slot: PageSlot, opener: Any) -> None:
-        # A thread owns the popups and tabs its page opens, and the ones those open in
-        # turn, so they close with the thread. Left open, a popup would also keep the
-        # bridge from stopping after the last thread closes (_is_busy counts every page).
-        # Patchright reports a popup only once it has set the page up, and not at all if
-        # the opener closed first, as when a thread closes right after the click that opened
-        # it; _close_thread_pages finds those through Chrome.
-        def adopt(popup: Any) -> None:
-            slot.popups = [page for page in slot.popups if self._page_is_open(page)] + [popup]
-            self._adopt_popups(slot, popup)
-
-        opener.on("popup", adopt)
-
     async def _close_thread_pages(self, slot: PageSlot) -> None:
-        session = None
-        popup_target_ids: set[str] = set()
-        try:
-            try:
-                if self._page_is_open(slot.page):
-                    session = await self._maybe_await(self._context().browser.new_browser_cdp_session())
-                    # Chrome lists a popup as opened by the thread's page from the start, before
-                    # Patchright reports it. Read that before closing anything: Chrome forgets a
-                    # popup's opener once the opener closes.
-                    popup_target_ids = self._opened_by(await self._tabs(session), slot.target_id)
-            finally:
-                # Even when Chrome could not be asked: the caller has already let go of the
-                # slot, so a page left open here would stay open for good.
-                # Popups go even when the thread's page already closed, as when a human closed
-                # it. Repeat until none is open: a popup can open another while these close.
-                while open_pages := [page for page in [slot.page, *slot.popups] if self._page_is_open(page)]:
-                    for page in open_pages:
-                        await self._maybe_await(page.close())
-            if popup_target_ids:
-                await self._close_tabs_and_wait(session, popup_target_ids)
-        finally:
-            await self._best_effort_detach(session)
-
-    @staticmethod
-    def _opened_by(tabs: list[dict[str, Any]], opener_target_id: str) -> set[str]:
-        """Targets of the tabs opener_target_id opened, and of the ones those opened in turn."""
-        opened: set[str] = set()
-        openers = {opener_target_id}
-        while openers:
-            openers = {tab["targetId"] for tab in tabs if tab.get("openerId") in openers} - opened
-            opened |= openers
-        return opened
-
-    async def _close_tabs_and_wait(self, session: Any, target_ids: set[str]) -> None:
-        for target_id in target_ids:
-            await self._close_tab(session, target_id)
-        # Chrome confirms a close before the tab is gone, and until Patchright sees it go the
-        # bridge counts it as an open page. Chrome sends Patchright the tab's detach before
-        # it answers with a list that leaves the tab out.
-        deadline = time.monotonic() + POPUP_CLOSE_TIMEOUT_S
-        while still_open := target_ids & {tab["targetId"] for tab in await self._tabs(session)}:
-            if time.monotonic() >= deadline:
-                # The thread is closed either way; until these go, the bridge stays up.
-                print(
-                    f"surf-agent: warning: {len(still_open)} popup tab(s) still closing after "
-                    f"{POPUP_CLOSE_TIMEOUT_S:g}s",
-                    file=sys.stderr,
-                )
-                return
-            await asyncio.sleep(POPUP_CLOSE_POLL_INTERVAL_S)
+        if self._page_is_open(slot.page):
+            await self._maybe_await(slot.page.close())
+        # Even when the page had already closed, as when a human closed it: the tabs it
+        # opened still belong to the thread.
+        await self._popups.close_popups_of(slot.target_id)
 
     async def _forget_blank_history_entry(self, page: Any) -> None:
         # The window commits about:blank before its first page, so back() would return
@@ -616,7 +557,7 @@ class PatchrightRuntime:
             session = await self._maybe_await(context.browser.new_browser_cdp_session())
             # Chrome restores the last session's tabs only into a window it opens after
             # having none: at launch, or after a human closes every Surf window.
-            chrome_was_windowless = not await self._tabs(session)
+            chrome_was_windowless = not await list_tabs(session)
             # Background: a foreground window activates Chrome and steals focus from the
             # user's app (measured on macOS). Thread.focus() raises a window on request.
             response = await self._maybe_await(
@@ -639,31 +580,15 @@ class PatchrightRuntime:
         finally:
             await self._best_effort_detach(session)
 
-    async def _tabs(self, session: Any) -> list[dict[str, Any]]:
-        # Read tabs from CDP rather than context.pages: Patchright never lists tabs that
-        # Chrome restored from the last session, nor popups it has not finished setting up.
-        # Chrome's own UI is type "browser_ui", and a subtype marks a page that is not a
-        # tab, such as a prerender.
-        response = await self._maybe_await(session.send("Target.getTargets"))
-        return [target for target in response["targetInfos"] if target["type"] == "page" and not target.get("subtype")]
-
     async def _close_restored_tabs(self, session: Any, *, new_window_target_id: str) -> None:
         # Chrome was windowless, so every other tab was restored into the new window, and
         # restored tabs are orphans: threads never outlive their windows. While any window
         # is open, other tabs belong to someone, such as a popup a thread's page opened or
         # a tab a human opened, so they are never swept. The restored tabs were present
         # when open() returned in every live run; one restored later stays open.
-        for tab in await self._tabs(session):
+        for tab in await list_tabs(session):
             if tab["targetId"] != new_window_target_id:
-                await self._close_tab(session, tab["targetId"])
-
-    async def _close_tab(self, session: Any, target_id: str) -> None:
-        try:
-            await self._maybe_await(session.send("Target.closeTarget", {"targetId": target_id}))
-        except Exception as exc:
-            # The tab can close on its own between listing and closing.
-            if MISSING_TARGET_MESSAGE not in str(exc):
-                raise
+                await close_tab(session, tab["targetId"])
 
     async def _wait_for_created_target_page(
         self, context: Any, existing_pages: list[Any], target_id: str

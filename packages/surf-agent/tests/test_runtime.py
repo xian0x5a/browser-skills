@@ -57,6 +57,8 @@ def snapshot_capture(text=None, **overrides):
 
 def answer_target_sweep(context, method, params):
     """Answer the browser-level CDP calls that list and close tabs from context.pages."""
+    if method == "Target.setDiscoverTargets":
+        return {}
     if method == "Target.getTargets":
         return {
             "targetInfos": [
@@ -147,9 +149,6 @@ class RuntimeTests(unittest.TestCase):
         # A windowless launch has no page to anchor a CDP session; opening one would
         # show a foreground window and steal focus.
         class FakePage:
-            def on(self, event, handler):
-                pass
-
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -165,6 +164,9 @@ class RuntimeTests(unittest.TestCase):
                 self.url = url
 
         class FakeSession:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, context, page):
                 self.context = context
                 self.page = page
@@ -224,6 +226,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_patchright_new_page_hands_closed_context_to_bridge_restart(self):
         class FakeSession:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, context):
                 self.context = context
 
@@ -284,9 +289,6 @@ class RuntimeTests(unittest.TestCase):
                 raise RuntimeError(patchright_bridge.CLOSED_TARGET_MESSAGE)
 
         class CreatedPage:
-            def on(self, event, handler):
-                pass
-
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -304,6 +306,9 @@ class RuntimeTests(unittest.TestCase):
                 self.url = url
 
         class FakeSession:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, context, page):
                 self.context = context
                 self.page = page
@@ -371,9 +376,6 @@ class RuntimeTests(unittest.TestCase):
         """Runtime over a fake Chrome whose CDP target list starts as open_tabs (target ids)."""
 
         class FakePage:
-            def on(self, event, handler):
-                pass
-
             def __init__(self, url, target_id):
                 self.url = url
                 self.target_id = target_id
@@ -389,6 +391,9 @@ class RuntimeTests(unittest.TestCase):
                 self.url = url
 
         class FakeSession:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, context, page):
                 self.context = context
                 self.page = page
@@ -397,6 +402,8 @@ class RuntimeTests(unittest.TestCase):
                 if method == "Target.getTargetInfo":
                     return {"targetInfo": {"targetId": self.page.target_id}}
                 if method == "Page.resetNavigationHistory":
+                    return {}
+                if method == "Target.setDiscoverTargets":
                     return {}
                 if method == "Target.getTargets":
                     return {"targetInfos": [dict(info) for info in self.context.targets.values()]}
@@ -534,9 +541,6 @@ class RuntimeTests(unittest.TestCase):
                 return "Body text"
 
         class FakePage:
-            def on(self, event, handler):
-                pass
-
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -591,6 +595,9 @@ class RuntimeTests(unittest.TestCase):
                 self.pressed = key
 
         class FakeSession:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, context, page):
                 self.context = context
                 self.page = page

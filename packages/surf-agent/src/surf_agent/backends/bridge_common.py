@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,10 +28,10 @@ class BridgeCodedError(RuntimeError):
 class PageSlot:
     page: Any
     page_id: int
-    # The page's CDP target, which Chrome names as the opener of the page's popups.
+    # The page's CDP target, which Chrome names as the opener of the page's popups. It
+    # holds for the page's life: Chrome does not prerender pages Patchright controls
+    # (PrerenderingDisabledByDevTools), so no prerender activation swaps it.
     target_id: str
-    # Pages the thread's page opened, and the ones those opened in turn.
-    popups: list[Any] = field(default_factory=list)
 
 
 

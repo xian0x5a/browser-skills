@@ -21,7 +21,12 @@ class Page:
 class NoTabsSession:
     """A browser CDP session over the fake pages, which Chrome would not list as tabs."""
 
+    def on(self, event, handler) -> None:
+        pass
+
     def send(self, method, params=None):
+        if method == "Target.setDiscoverTargets":
+            return {}
         assert method == "Target.getTargets", method
         return {"targetInfos": []}
 

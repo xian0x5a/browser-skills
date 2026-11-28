@@ -545,7 +545,9 @@ class PatchrightRuntime:
         """
         self.after_response(name)
         if self.shutdown_requested and not self._stopping:
-            if self._is_busy():
+            chrome_lists_tabs = await self._chrome_lists_tabs()
+            # Checked after that round trip, which a new call may have come in during.
+            if chrome_lists_tabs or self._is_busy():
                 self._cancel_shutdown_request()
             else:
                 self._stopping = True
@@ -558,6 +560,19 @@ class PatchrightRuntime:
             # process to go, and stop_bridge() kills whatever the failed stop left behind.
             print(f"surf-agent: warning: could not stop Patchright bridge cleanly: {exc}", file=sys.stderr)
         return True
+
+    async def _chrome_lists_tabs(self) -> bool:
+        # Patchright reports a tab only once its first navigation commits, so a popup still
+        # loading is a tab of Chrome's but not a page of Patchright's; stopping would kill it.
+        if self.browser_or_context is None:
+            return False
+        try:
+            return bool(await list_tabs(await self._popups.watch()))
+        except Exception as exc:
+            if not self._is_closed_target_error(exc):
+                raise
+            # Chrome is gone, and every tab with it.
+            return False
 
     def _is_busy(self) -> bool:
         # An in-flight call may be creating a window that is not visible yet.

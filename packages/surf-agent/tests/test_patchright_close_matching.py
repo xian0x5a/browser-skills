@@ -15,6 +15,7 @@ from surf_agent.backends.local_bridge import LocalBridgeClient
 from surf_agent.backends.patchright.backend import PatchrightBackend, PatchrightBridgeClient
 from runtime_driver import SyncRuntime
 from surf_agent.backends.patchright.bridge import PatchrightRuntime
+from surf_agent.backends.patchright.constants import CONTEXT_RESTART_REQUIRED
 from surf_agent.runtime import SurfAgent
 from surf_agent import Browser
 from surf_agent.errors import BridgeIdentityUnproven, BridgeUnavailable, SurfAgentError
@@ -168,6 +169,25 @@ def test_call_tool_if_running_returns_healthy_bridge_result(tmp_path: Path) -> N
         patch("surf_agent.backends.local_bridge.urllib.request.urlopen", return_value=bridge_response("closed\n")),
     ):
         assert client.call_tool_if_running("close-matching", {"pattern": "*"}) == "closed\n"
+
+
+def test_call_tool_if_running_treats_a_stopping_bridge_as_not_running(tmp_path: Path) -> None:
+    client = PatchrightBridgeClient(timeout_s=1, port=9555, profile_dir=tmp_path / "profile")
+    restart_required = urllib.error.HTTPError(
+        "http://127.0.0.1:9555/call",
+        500,
+        "Internal Server Error",
+        hdrs=None,
+        fp=BytesIO(json.dumps({"error": CONTEXT_RESTART_REQUIRED, "code": None}).encode()),
+    )
+
+    with (
+        # Healthy for the preflight and the first wait poll, then gone: the stop finished.
+        patch.object(client, "_health_ok", side_effect=[True, True, False]),
+        patch("surf_agent.backends.local_bridge.BRIDGE_HEALTH_POLL_INTERVAL_S", 0),
+        patch("surf_agent.backends.local_bridge.urllib.request.urlopen", side_effect=restart_required),
+    ):
+        assert client.call_tool_if_running("state", {"thread": "main"}) is None
 
 
 def test_call_tool_if_running_preserves_bridge_errors(tmp_path: Path) -> None:

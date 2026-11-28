@@ -116,6 +116,8 @@ def test_sign_in_popup_is_a_thread_that_reports_back_to_its_opener(launch, site)
         runtime.call("click", {"thread": "app/1", "uid": "#submit"})
 
         wait_until(runtime, lambda: len(open_pages(runtime)) == 1, "the popup to close itself")
+        # postMessage delivers on the opener's next task, shortly after the popup went.
+        runtime.call("wait-for", {"thread": "app", "text": "ada"})
         # The opener's own page was never swapped for the popup.
         assert runtime.call("text", {"thread": "app", "target": "#result"}) == "ada\n"
         assert json.loads(runtime.call("eval", {"thread": "app", "code": "window.name"})) == ""

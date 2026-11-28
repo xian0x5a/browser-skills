@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 DEFAULT_THREAD = "default"
+# Popup threads are named <thread>/<n>; only Surf creates them (docs/adr/0012).
+POPUP_THREAD_SEPARATOR = "/"
 DEFAULT_COMMAND_TIMEOUT_S = 15.0
 PATCHRIGHT_BACKEND = "patchright"
 DEFAULT_PATCHRIGHT_PORT = "9346"

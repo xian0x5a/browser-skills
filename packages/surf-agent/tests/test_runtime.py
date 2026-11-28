@@ -149,6 +149,9 @@ class RuntimeTests(unittest.TestCase):
         # A windowless launch has no page to anchor a CDP session; opening one would
         # show a foreground window and steal focus.
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -289,6 +292,9 @@ class RuntimeTests(unittest.TestCase):
                 raise RuntimeError(patchright_bridge.CLOSED_TARGET_MESSAGE)
 
         class CreatedPage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -376,6 +382,9 @@ class RuntimeTests(unittest.TestCase):
         """Runtime over a fake Chrome whose CDP target list starts as open_tabs (target ids)."""
 
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url, target_id):
                 self.url = url
                 self.target_id = target_id
@@ -541,6 +550,9 @@ class RuntimeTests(unittest.TestCase):
                 return "Body text"
 
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self, url="about:blank", *, target_id="page-target"):
                 self.url = url
                 self.target_id = target_id
@@ -756,6 +768,9 @@ class RuntimeTests(unittest.TestCase):
                 self.clicked = True
 
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self):
                 self.iframe_button = FakeNativeRefLocator(1)
                 self.stale = FakeNativeRefLocator(0)
@@ -792,6 +807,9 @@ class RuntimeTests(unittest.TestCase):
         self,
     ):
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self):
                 self.screenshot_calls = []
 
@@ -851,6 +869,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_patchright_snapshot_preserves_native_and_literal_refs(self):
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def aria_snapshot(self, *args, **kwargs):
                 return '- button "[ref=e999]" [ref=e188]\n- paragraph [ref=e189]: Hello [ref=e777]'
 
@@ -866,6 +887,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_patchright_snapshot_passes_playwright_cli_aria_options(self):
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self):
                 self.calls = []
 
@@ -898,6 +922,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_patchright_snapshot_default_depth_and_boxes_are_explicit(self):
         class FakePage:
+            def on(self, event, handler):
+                pass
+
             def __init__(self):
                 self.calls = []
 
@@ -1165,6 +1192,9 @@ def test_snapshot_masks_an_input_value_whose_ref_the_browser_cannot_resolve() ->
             return fail
 
     class FakePage:
+        def on(self, event, handler):
+            pass
+
         def is_closed(self):
             return False
 

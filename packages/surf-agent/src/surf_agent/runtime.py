@@ -23,6 +23,7 @@ from .constants import (
     DEFAULT_PATCHRIGHT_APP_ID,
     DEFAULT_PATCHRIGHT_PORT,
     DEFAULT_THREAD,
+    POPUP_THREAD_SEPARATOR,
     PATCHRIGHT_BROWSER_FAMILY,
     SURF_AGENT_WINDOW_TITLE,
 )
@@ -168,10 +169,14 @@ def patchright_disk_cache_dir(profile_dir: Path) -> Path | None:
 
 def safe_thread_name(thread: str) -> str:
     value = thread.strip() or DEFAULT_THREAD
-    allowed = all(ch.isalnum() or ch in {"-", "_", "."} for ch in value)
-    if not allowed or value in {".", ".."} or value.startswith("."):
+    # A popup thread's name is its thread's name and a number Surf gave it.
+    name, separator, number = value.partition(POPUP_THREAD_SEPARATOR)
+    is_popup_number = number.isascii() and number.isdigit() and not number.startswith("0")
+    allowed = all(ch.isalnum() or ch in {"-", "_", "."} for ch in name)
+    if not allowed or name in {"", ".", ".."} or name.startswith(".") or (separator and not is_popup_number):
         raise SurfAgentError(
-            "--thread may contain only letters, numbers, '.', '-', and '_' and must not start with '.'",
+            "--thread may contain only letters, numbers, '.', '-', and '_' and must not start with '.'; "
+            "popup threads are named <thread>/<number>",
             exit_code=2,
         )
     return value

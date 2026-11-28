@@ -89,6 +89,17 @@ class PopupTracker:
             opened |= openers
         return opened
 
+    def recorded_popups_of(self, opener_target_id: str) -> set[str]:
+        """The tabs opener_target_id opened, directly or through others, as recorded so far, closed ones included."""
+        return self._opened_by(opener_target_id)
+
+    async def open_popups_of(self, opener_target_id: str) -> set[str]:
+        """The tabs opener_target_id opened, directly or through others, that Chrome lists now."""
+        session = await self.watch()
+        listed = {tab["targetId"] for tab in await list_tabs(session)}
+        # Only after the list: Chrome announces a tab before it answers a later list.
+        return listed & self._opened_by(opener_target_id)
+
     async def close_popups_of(self, opener_target_id: str) -> None:
         """Close the tabs a closing or closed page opened, directly or through other tabs.
 

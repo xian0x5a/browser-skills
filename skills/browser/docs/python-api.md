@@ -14,7 +14,9 @@ Except `emit()`, methods return values without printing. Use explicit `print()` 
 
 ### `Thread(name='default')`
 
-Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline.
+Named ownership handle, not a raw tab selector. Handles for the same name in one Python process share its emission baseline. Names you choose use letters, numbers, `.`, `-` and `_`. A popup or tab the thread's page opens, directly or through its popups, becomes a popup thread named `<name>/<n>`, numbered in opening order and never reused; only Surf creates those.
+
+Every method works on a popup thread while its page is open, and `open(url)` navigates the popup. Once the popup has closed, every method raises `page_closed`, whose message names the thread's pages still open; a popup thread never reopens, since a new window would have lost `window.opener`.
 
 ### `thread.open(url) -> str`
 
@@ -96,9 +98,13 @@ Writes the captured observation to stdout or a text sink; `full=True` forces com
 
 Brings the remembered page forward.
 
+### `thread.popups() -> list[Thread]`
+
+The open popup threads of this thread, oldest first; on a popup thread, those of the thread it belongs to. An action whose output reports it opened a popup, as `opened popup Thread("<name>/<n>"): <url>`, has already added it here.
+
 ### `thread.close() -> None`
 
-Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure.
+Closes the managed page, with the popups and tabs it opened, and clears the emission baseline; raises on bridge failure. On a popup thread, closes that popup and the popups it opened.
 
 ## Snapshot output
 

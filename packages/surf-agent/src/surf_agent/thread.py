@@ -13,7 +13,7 @@ from typing import Any, TextIO
 from .backends.base import ScreenshotOptions, WaitConditions
 from .runtime import SurfAgent, safe_thread_name
 from .snapshots import SnapshotCapture, choose_snapshot_diff
-from .constants import DEFAULT_THREAD
+from .constants import DEFAULT_THREAD, POPUP_THREAD_SEPARATOR
 from .errors import SurfAgentError
 
 
@@ -205,6 +205,13 @@ class Thread:
         if status not in (None, 0):
             raise SurfAgentError(f"close failed for thread {self.name}: backend returned status {status}")
         _baselines.pop(self.name, None)
+
+    def popups(self) -> list[Thread]:
+        """The open popup threads of this thread, or of the thread a popup thread belongs to, in opening order."""
+        root = self.name.partition(POPUP_THREAD_SEPARATOR)[0]
+        prefix = root + POPUP_THREAD_SEPARATOR
+        names = [row["thread"] for row in self._agent.browser_backend.list_threads() if row["thread"].startswith(prefix)]
+        return [Thread(name) for name in sorted(names, key=lambda name: int(name.removeprefix(prefix)))]
 
     def focus(self) -> None:
         """Bring the managed window to the foreground."""

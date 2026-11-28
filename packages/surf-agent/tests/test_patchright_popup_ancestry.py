@@ -76,6 +76,9 @@ class FakePage:
     def is_closed(self) -> bool:
         return self.closed
 
+    def on(self, event: str, handler: Callable[..., Any]) -> None:
+        pass  # Patchright never reports these popups, so no event fires
+
     async def close(self) -> None:
         if not self.closed:
             self.before_close()

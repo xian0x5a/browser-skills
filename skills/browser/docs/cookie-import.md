@@ -39,7 +39,7 @@ Every scope excludes Google's sign-in hosts: `google.<any suffix>` (google.com, 
 
 The exclusion applies to allowlists too, because an imported `google.com` forks the session exactly like an all-domain import. So `set_cookie_source(..., domains=["google.com"])` and `import_cookies_for("google.com")` fail rather than import nothing. Pass `exclude_google=False` only when the user accepts being signed out of Google in their normal Chrome.
 
-Excluding a domain stops future imports only; cookies imported earlier stay in Surf. To clear Google cookies imported before, delete their rows from Surf's `Cookies` database while Surf's Chrome is stopped. Do not sign out of Google inside Surf: the copied session is the source browser's, so signing out ends it there too.
+Excluding a domain stops future imports only; cookies imported earlier stay in Surf. To clear Google cookies imported before, delete their rows from Surf's `Cookies` database (in `Default/` under `Browser().profile().profile_dir`) while Surf's Chrome is stopped. Do not sign out of Google inside Surf: the copied session is the source browser's, so signing out ends it there too.
 
 ## Import for one site
 

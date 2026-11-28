@@ -51,8 +51,9 @@ A thread reaches only its own page today. Probe (headless, local pages): after `
 ## Progress
 
 - 2026-11-27: Decided D after prior-art research (Codex's browser plugin read from its local install, Playwright MCP, Chrome DevTools MCP, browser-use, Stagehand, agent-browser, T3 Code's preview probed live). Reports: `~/.agents/artifacts/outputs/browser-skills/2026-11-27/popup-prior-art/report.md`, `~/.agents/artifacts/outputs/browser-skills/2026-11-27/codex-browser-use/report.md`. Issue #71, ADR 0012 and this plan written; layer 1 not started.
-- 2026-11-27: Layer 1 implemented on Patchright's `popup` event (f7ba17b). Unit 276 passed, the live popup tests 9/9 in three runs, the full live suite 356 passed.
-- 2026-11-27: Review (fable, high) found four defects: a popup opened by a popup that closed in the same task was lost; announcements outlived their popups; `focus` dropped announcements; `popups()[-1]` could name an older popup. Membership moved onto Chrome's openers (Design above).
+- 2026-11-27: Layer 1 implemented on Patchright's `popup` event (d8174ae). Unit 276 passed, the live popup tests 9/9 in three runs, the full live suite 356 passed.
+- 2026-11-27: Review (fable, high) found four defects: a popup opened by a popup that closed in the same task was lost; announcements outlived their popups; `focus` dropped announcements; `popups()[-1]` could name an older popup. Membership moved onto Chrome's openers (Design above; 78fab92), with regression tests written first by an independent agent, each failing on d8174ae (cd0a5da).
+- 2026-11-27: Second review (fable, high) found closing a popup thread could leave a child that Chrome had re-pointed to the root meanwhile; `PopupTracker` now keeps the first opener named (35a3633, regression test first). Full live suite 361 passed. Runtime pinned (819b07c). Out-of-scope findings filed: #72 (`list` hangs on a frozen page), #73 (bridge stderr discarded), #74 (`is_open()` true after a human closed the window), #75 (hidden opener slow).
 
 ## Surprises & Discoveries
 
@@ -60,6 +61,7 @@ A thread reaches only its own page today. Probe (headless, local pages): after `
 - Chrome refuses to prerender pages Patchright controls (`PrerenderingDisabledByDevTools`), so a page's target ID is stable.
 - Patchright's click does not always wait for the popup it opens: the `popup` event can come after the action returned. Chrome, though, announces the new tab before it acknowledges the input, so an action can tell cheaply whether it opened one.
 - Patchright fires `popup` only while the opener is open, and reports a popup only once its first navigation commits (a blank `window.open('')` popup at once). A popup whose first response takes over 3 s is announced by a later action; one that never commits (a 204) stays a blank tab until its owner closes.
+- When a popup closes, Chrome re-points the tabs it opened to its own opener, and a later `Target.targetInfoChanged` (any URL or title change) carries the new opener. Only the first opener named keeps the tree as created.
 - A sign-in popup's `postMessage` reaches the opener about 60 ms after the popup closed itself, so a check of the opener must wait for the result.
 - T3 Code's preview lists a `target=_blank` tab as unowned, which the agent cannot close, and doesn't list a `window.open` popup at all.
 
@@ -73,4 +75,4 @@ A thread reaches only its own page today. Probe (headless, local pages): after `
 
 ## Outcomes & Retrospective
 
-(To fill when layer 1 lands.)
+Layer 1 is in place: popup threads are adopted through Chrome's recorded openers, announced in action output, listed by `popups()`, fail closed, and close with their thread. The first design, on Patchright's `popup` event, passed its acceptance tests but lost popups whose opener had closed and left announcements pointing at closed popups. Two independent reviews found what the acceptance tests did not; the lesson is that ownership needs one source of truth, here Chrome's openers, with Patchright supplying only the page objects. Layer 2 (rename moving popup threads, `browser.threads()` showing roots) is still open.

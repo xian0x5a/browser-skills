@@ -641,7 +641,10 @@ class PatchrightRuntime:
     def _closed_popup_thread_error(self, thread: str) -> BridgeCodedError:
         root = self._root_of(thread)
         open_threads = [
-            name for name in [root, *self._popup_threads_of(root)] if name in self.pages and self._page_is_open(self.pages[name].page)
+            name
+            for name in [root, *self._popup_threads_of(root)]
+            # Not the thread itself: the error can arrive before its page's close event.
+            if name != thread and name in self.pages and self._page_is_open(self.pages[name].page)
         ]
         return BridgeCodedError(
             ErrorCode.PAGE_CLOSED,

@@ -77,9 +77,10 @@ class PopupTracker:
     def _remember_opener(self, event: dict[str, Any]) -> None:
         info = event["targetInfo"]
         # A tab names its opener from the moment it exists. Later updates may name an
-        # ancestor instead, once the opener closed, or none: keep the last one named.
+        # ancestor instead, once the opener closed, or none: keep the first one named, so
+        # closing a popup still finds the tabs it opened after Chrome re-pointed them.
         if opener := info.get("openerId"):
-            self._opener_of[info["targetId"]] = opener
+            self._opener_of.setdefault(info["targetId"], opener)
 
     def _opened_by(self, opener_target_id: str) -> set[str]:
         opened: set[str] = set()

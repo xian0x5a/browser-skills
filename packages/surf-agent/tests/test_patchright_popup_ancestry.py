@@ -1,9 +1,9 @@
 """Closing a thread closes the tabs its page opened, even once Chrome no longer links them to it (issue #66).
 
-Chrome names a tab's opener (``openerId``) only while that opener is open, and Patchright
-reports a popup only once it has set the popup up, never while its opener is closing or
-closed. The fake below models both, so a popup here is listed by Chrome but never reported
-through ``page.on("popup")``.
+When a tab's opener closes, Chrome hands the tab to the opener's own opener (``openerId``),
+or drops the link once none is left. Patchright reports a popup only once it has set the
+popup up, never while its opener is closing or closed. The fake models both: Chrome lists
+its popups, and Patchright never reports them.
 """
 from __future__ import annotations
 
@@ -46,11 +46,14 @@ class FakeChrome:
     def close_tab(self, target_id: str) -> None:
         if target_id not in self.targets:
             raise Exception(MISSING_TARGET)
-        del self.targets[target_id]
+        closed = self.targets.pop(target_id)
         self.pages.pop(target_id).closed = True
         for info in self.targets.values():
             if info.get("openerId") == target_id:
-                del info["openerId"]
+                if "openerId" in closed:
+                    info["openerId"] = closed["openerId"]
+                else:
+                    del info["openerId"]
                 self._emit("Target.targetInfoChanged", {"targetInfo": dict(info)})
         self._emit("Target.targetDestroyed", {"targetId": target_id})
 
@@ -72,9 +75,6 @@ class FakePage:
 
     def is_closed(self) -> bool:
         return self.closed
-
-    def on(self, event: str, handler: Callable[..., Any]) -> None:
-        assert event == "popup", f"unexpected page event {event!r}"  # and the fake never fires it
 
     async def close(self) -> None:
         if not self.closed:
@@ -155,20 +155,14 @@ def popup_opened_while_closing(runtime, chrome, page_a):
 
 
 def page_closed_before_surf_closes_it(runtime, chrome, page_a):
-    chrome.open_popup(page_a, "popup-of-a")
+    popup = chrome.open_popup(page_a, "popup-of-a")
+    chrome.open_popup(popup, "popup-of-popup")
     chrome.close_tab(page_a)  # as a human, or window.close(), would
-
-
-def popup_opened_by_a_popup_that_closed(runtime, chrome, page_a):
-    middle = chrome.open_popup(page_a, "middle")
-    chrome.open_popup(middle, "popup-of-popup")
-    chrome.close_tab(middle)
 
 
 SCENARIOS = {
     "popup opens while the thread closes": popup_opened_while_closing,
     "thread page closed beforehand": page_closed_before_surf_closes_it,
-    "opener popup closed in the chain": popup_opened_by_a_popup_that_closed,
 }
 
 

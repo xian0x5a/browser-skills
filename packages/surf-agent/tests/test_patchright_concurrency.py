@@ -23,9 +23,6 @@ async def bounded(awaitable):
 
 
 class FakePage:
-    def on(self, event, handler):
-        pass
-
     def __init__(self, target_id: str):
         self.target_id = target_id
         self.url = "about:blank"
@@ -56,6 +53,9 @@ class FakePage:
 class FakeSession:
     """Answers the CDP calls the runtime sends, from the context's page list."""
 
+    def on(self, event, handler):
+        pass
+
     def __init__(self, context, page=None):
         self.context = context
         self.page = page
@@ -65,6 +65,8 @@ class FakeSession:
         if context.closed:
             await asyncio.sleep(INTERLEAVE_S)
             raise RuntimeError(bridge.CLOSED_TARGET_MESSAGE)
+        if method == "Target.setDiscoverTargets":
+            return {}
         if method == "Target.getTargetInfo":
             return {"targetInfo": {"targetId": self.page.target_id}}
         if method == "Page.resetNavigationHistory":

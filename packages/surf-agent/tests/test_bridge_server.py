@@ -68,12 +68,17 @@ class FakePage:
 class FakeSession:
     """Answers the CDP calls window creation sends, from the context's page list."""
 
+    def on(self, event, handler):
+        pass
+
     def __init__(self, context, page=None):
         self.context = context
         self.page = page
 
     async def send(self, method, params=None):
         context = self.context
+        if method == "Target.setDiscoverTargets":
+            return {}
         if method == "Target.getTargetInfo":
             return {"targetInfo": {"targetId": self.page.target_id}}
         if method == "Page.resetNavigationHistory":

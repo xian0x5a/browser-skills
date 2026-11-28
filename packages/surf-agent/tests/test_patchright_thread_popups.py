@@ -175,7 +175,7 @@ def test_a_popup_opened_while_the_thread_closes_closes_with_it(launch, site):  #
         popup_url = site.replace("127.0.0.1", "localhost") + "/busy.html?owner=racing"
 
         async def open_popup_then_close(**kwargs):
-            # The page opens its popup just before it goes, after Surf has looked for the thread's popups.
+            # The page opens its popup once Surf has started closing the thread, just before the page goes.
             await page.evaluate(OPEN_POPUP_CODE % popup_url)
             await real_close(**kwargs)
 
